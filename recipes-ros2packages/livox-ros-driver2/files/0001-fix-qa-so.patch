@@ -1,0 +1,46 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 7344d08..eca8dcb 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -257,6 +257,7 @@ else(ROS_EDITION STREQUAL "ROS2")
+   link_directories(${PCL_LIBRARY_DIRS})
+   add_definitions(${PCL_DEFINITIONS})
+ 
++
+   # livox ros2 driver target
+   ament_auto_add_library(${PROJECT_NAME} SHARED
+     src/livox_ros_driver2.cpp
+@@ -312,6 +313,26 @@ else(ROS_EDITION STREQUAL "ROS2")
+     ${APR_LIBRARIES}
+   )
+ 
++  # Set SOVERSION on all shared libraries for proper Yocto packaging
++  set_target_properties(${PROJECT_NAME} PROPERTIES SOVERSION 1)
++
++  # Set SOVERSION on rosidl-generated targets if they exist
++  set(_rosidl_targets
++    ${LIVOX_INTERFACES}__rosidl_generator_c
++    ${LIVOX_INTERFACES}__rosidl_typesupport_c
++    ${LIVOX_INTERFACES}__rosidl_typesupport_cpp
++    ${LIVOX_INTERFACES}__rosidl_typesupport_introspection_c
++    ${LIVOX_INTERFACES}__rosidl_typesupport_introspection_cpp
++    ${LIVOX_INTERFACES}__rosidl_typesupport_fastrtps_c
++    ${LIVOX_INTERFACES}__rosidl_typesupport_fastrtps_cpp
++    ${LIVOX_INTERFACES}__rosidl_generator_py
++  )
++  foreach(_target ${_rosidl_targets})
++    if(TARGET ${_target})
++      set_target_properties(${_target} PROPERTIES SOVERSION 1)
++    endif()
++  endforeach()
++
+   rclcpp_components_register_node(${PROJECT_NAME}
+     PLUGIN "livox_ros::DriverNode"
+     EXECUTABLE ${PROJECT_NAME}_node
+@@ -333,4 +354,4 @@ else(ROS_EDITION STREQUAL "ROS2")
+     launch_ROS2
+   )
+ 
+-endif()
+\ No newline at end of file
++endif()

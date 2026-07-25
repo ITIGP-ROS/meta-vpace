@@ -1,0 +1,70 @@
+DESCRIPTION = "Ackermann Robot Bringup Files"
+MAINTAINER = "Youhana Beshay <youhanabeshay@gmail.com>"
+LICENSE = "CLOSED"
+
+inherit ros_distro_humble
+inherit ros_ament_cmake
+
+SRC_URI = "file://ackermann_bringup"
+S = "${WORKDIR}/ackermann_bringup"
+
+ROS_BUILD_DEPENDS = " \
+    ament-cmake-native \
+    rclcpp \
+    geometry-msgs \
+"
+
+# removed rviz and teleop as we sont be needing them on the project
+# also remvoed slam-toolbox as it will be done on a separate computer and not on the robot itself
+
+ROS_EXEC_DEPENDS = " \
+    rclcpp \
+    rclpy \
+    geometry-msgs \
+    nav-msgs \
+    sensor-msgs \
+    std-msgs \
+    std-srvs \
+    ament-index-python \
+    launch \
+    launch-ros \
+    ackermann-description \
+    xacro \
+    ackermann-hardware \
+    robot-state-publisher \
+    joint-state-publisher \
+    tf2-ros \
+    controller-manager \
+    joint-state-broadcaster \
+    imu-sensor-broadcaster \
+    ackermann-steering-controller \
+    robot-localization \
+    pointcloud-to-laserscan \
+    livox-ros-driver2 \
+"
+# Nav2 (only the packages we actually need)
+ROS_EXEC_DEPENDS += " \
+    nav2-amcl \
+    nav2-behavior-tree \
+    nav2-behaviors \
+    nav2-bt-navigator \
+    nav2-common \
+    nav2-controller \
+    nav2-core \
+    nav2-costmap-2d \
+    nav2-lifecycle-manager \
+    nav2-map-server \
+    nav2-mppi-controller \
+    nav2-msgs \
+    nav2-planner \
+    nav2-smac-planner \
+    nav2-smoother \
+    nav2-util \
+    nav2-velocity-smoother \
+    nav2-waypoint-follower \
+    spatio-temporal-voxel-layer \
+"
+
+
+DEPENDS = "${ROS_BUILD_DEPENDS}"
+RDEPENDS:${PN} += "${ROS_EXEC_DEPENDS}"

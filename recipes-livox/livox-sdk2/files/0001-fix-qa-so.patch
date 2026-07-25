@@ -1,0 +1,18 @@
+diff --git a/sdk_core/CMakeLists.txt b/sdk_core/CMakeLists.txt
+index 15e960d..22fb14e 100644
+--- a/sdk_core/CMakeLists.txt
++++ b/sdk_core/CMakeLists.txt
+@@ -17,9 +17,11 @@ set(LIVOX_API_HEADER
+         ../include/livox_lidar_cfg.h
+         )
+ 
+-set_target_properties(${SDK_LIBRARY_STATIC} #${SDK_LIBRARY_SHARED} 
++set_target_properties(${SDK_LIBRARY_STATIC} ${SDK_LIBRARY_SHARED}
+         PROPERTIES
+         PUBLIC_HEADER "${LIVOX_API_HEADER}"
++        VERSION ${LIVOX_SDK_VERSION_STRING}
++        SOVERSION ${LIVOX_SDK_MAJOR_VERSION}
+         )
+ 
+ if(WIN32)
+

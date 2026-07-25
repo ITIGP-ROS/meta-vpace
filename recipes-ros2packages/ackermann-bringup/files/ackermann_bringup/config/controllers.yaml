@@ -1,0 +1,55 @@
+controller_manager:
+  ros__parameters:
+    update_rate: 30
+#    use_sim_time is false by default
+#    true during sim by adding gz_control_sim_time.yaml to gazebo plugin in urdf
+
+    joint_state_broadcaster:
+      type: joint_state_broadcaster/JointStateBroadcaster
+
+    ackermann_controller:
+      type: ackermann_steering_controller/AckermannSteeringController
+
+    imu_broadcaster:
+      type: imu_sensor_broadcaster/IMUSensorBroadcaster
+
+imu_broadcaster:
+  ros__parameters:
+    sensor_name: imu_sensor
+    frame_id: imu_link
+    static_covariance_orientation: [0.01, 0.0, 0.0, 0.0, 0.01, 0.0, 0.0, 0.0, 0.01]
+    static_covariance_angular_velocity: [0.01, 0.0, 0.0, 0.0, 0.01, 0.0, 0.0, 0.0, 0.01]
+    static_covariance_linear_acceleration: [0.01, 0.0, 0.0, 0.0, 0.01, 0.0, 0.0, 0.0, 0.01]
+
+ackermann_controller:
+  ros__parameters:
+    # Drive wheels (velocity)
+    rear_wheels_names:
+      - rear_right_wheel_joint
+      - rear_left_wheel_joint
+    
+    # Steering joints (position) - NOT the wheel joints!
+    front_wheels_names:
+      - front_right_steering_joint
+      - front_left_steering_joint
+
+    # Geometry
+    wheelbase: 0.23529
+    rear_wheel_track: 0.18179
+    front_wheel_track: 0.12
+    front_wheels_radius: 0.0325
+    rear_wheels_radius: 0.0325
+    front_steering: true
+    max_steering_angle: 0.373302 # 21.38 degrees, must match URDF limit
+
+    # Controller params
+    reference_timeout: 2.0
+    open_loop: false
+    velocity_rolling_window_size: 10
+    position_feedback: true
+    use_stamped_vel: true
+    
+    # TF
+    base_frame_id: base_footprint
+    odom_frame_id: odom
+    enable_odom_tf: false

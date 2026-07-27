@@ -19,3 +19,7 @@ CXXFLAGS += "-include cstdint"
 # Install to standard paths so livox_ros_driver2 can find it
 EXTRA_OECMAKE += "-DCMAKE_INSTALL_PREFIX=${prefix}"
 
+FILES_SOLIBSDEV = ""
+FILES:${PN} += "${libdir}/liblivox_lidar_sdk_shared.so"
+INSANE_SKIP:${PN} += "dev-so"
+

@@ -1,0 +1,44 @@
+[Unit]
+Description=IVI OTA agent (MQTT campaign -> decrypt -> swupdate)
+Documentation=file:/usr/share/doc/ivi-ota-agent/README.md
+# Needs DNS and a route before mosquitto_sub/curl will get anywhere. network-online
+# (not just network.target) because the agent connects immediately on start.
+After=network-online.target time-sync.target
+Wants=network-online.target
+# TLS to io.adafruit.com fails closed if the clock is wrong, and a board with no
+# RTC boots at epoch. Not a hard dependency: a working NTP is not guaranteed.
+After=systemd-timesyncd.service
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/ivi_ota_agent.sh
+# The agent is a long-lived subscriber; a dropped broker connection ends
+# mosquitto_sub and therefore the script. Always come back, but not in a hot loop.
+Restart=always
+RestartSec=15
+
+# Runs as root: swupdate writes the rootfs/app and the agent reads a 0600 private
+# key. Narrow what that root can reach.
+User=root
+StateDirectory=ivi-ota
+StateDirectoryMode=0700
+ConfigurationDirectory=ivi-ota
+ConfigurationDirectoryMode=0700
+
+NoNewPrivileges=yes
+ProtectHome=yes
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+# NOT ProtectSystem=strict: swupdate must write /usr/bin/appIVI and /usr/assets,
+# and install-ivi.lua runs `systemctl restart ivi`. Tightening this any further
+# breaks the install, not the agent.
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=ivi-ota-agent
+
+[Install]
+WantedBy=multi-user.target

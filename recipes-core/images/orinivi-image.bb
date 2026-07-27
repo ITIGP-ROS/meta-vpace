@@ -19,6 +19,8 @@ VIRTUAL-RUNTIME_sh = "bash"
 
 # --- SWUpdate integration ---
 IMAGE_INSTALL:append = " swupdate "
+IMAGE_INSTALL:append = " swupdate-key "
+IMAGE_INSTALL:append = " data-partition-mount "
 IMAGE_FSTYPES:append = " tar.gz"
 
 # --- our ROS2 packages ---
@@ -39,18 +41,28 @@ IMAGE_INSTALL:append = " \
     kernel-module-hid-multitouch \
     "
 
+# --- OTA Agent ---
+IMAGE_INSTALL:append = " ivi-ota-agent"
+
+
 # --- Network configuration ---
-# Explicitly remove NetworkManager if it ever sneaks in
-IMAGE_INSTALL:remove = "networkmanager networkmanager-nmcli networkmanager-wait-online"
+
+IMAGE_INSTALL:append = " networkmanager-nmcli "
 
 #  WiFi kernel module and firmware
 IMAGE_INSTALL:append = " kernel-module-mt7601u linux-firmware-mt7601u "
 # CAN kernel modules
 IMAGE_INSTALL:append = " can-utils kernel-module-can kernel-module-mttcan kernel-module-can-raw "
+# USB camera kernel module
+IMAGE_INSTALL:append = " kernel-module-uvcvideo "
 # CAN interface configuration
 IMAGE_INSTALL:append = " can-config "
-# ETH configuration
-IMAGE_INSTALL:append = " static-eth "
+# NetworkManager handles ethernet (nm-config provides connection profile)
+# static-eth (systemd-networkd) is intentionally replaced
+IMAGE_INSTALL:append = " nm-config "
+
+# Wifi-credential sender (pushes SSID/password)
+IMAGE_INSTALL:append = " wifi-cred-sender "
 
 # --- Qt6 multimedia config ---
 PACKAGECONFIG:append:pn-qtmultimedia = " gstreamer alsa pulseaudio "

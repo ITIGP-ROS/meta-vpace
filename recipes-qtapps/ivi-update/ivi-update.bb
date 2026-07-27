@@ -1,0 +1,19 @@
+SUMMARY = "SWUpdate payload for IVI application updates"
+LICENSE = "CLOSED"
+
+inherit swupdate
+
+SRC_URI = " \
+    file://sw-description \
+    file://install-ivi.lua \
+"
+
+S = "${WORKDIR}/${PN}"
+
+# Depend on ivi to produce the tarball
+IMAGE_DEPENDS = "ivi"
+
+# Tell SWUpdate to look for the ivi-app tarball in DEPLOY_DIR_IMAGE
+SWUPDATE_IMAGES = "ivi-app-${MACHINE}.tar.gz"
+
+do_swuimage[vardeps] ?= "${@swupdate_find_bitbake_variables(d)}"

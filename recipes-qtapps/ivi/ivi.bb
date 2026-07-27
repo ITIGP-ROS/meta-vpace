@@ -2,15 +2,14 @@ SUMMARY = "ITI Qt6 IVI Application"
 LICENSE = "CLOSED"
 
 SRC_URI = " \
-    git://github.com/EhabMagdyy/ITI-QtProject.git;protocol=https;branch=Ehab \
+    git://github.com/ITIGP-ROS/IVI.git;protocol=https;branch=main \
     file://ivi-app.service \
 "
 
 SRCREV = "${AUTOREV}"
 PV = "1.0+git${SRCPV}"
 
-# CMakeLists.txt is inside the IVI/ subdirectory
-S = "${WORKDIR}/git/IVI"
+S = "${WORKDIR}/git"
 
 inherit qt6-cmake systemd
 
@@ -76,3 +75,10 @@ FILES:${PN} += " \
 
 SYSTEMD_AUTO_ENABLE = "enable"
 SYSTEMD_SERVICE:${PN} = "ivi-app.service"
+
+# for swupdate
+do_deploy() {
+    tar czf ${DEPLOY_DIR_IMAGE}/ivi-app-${MACHINE}.tar.gz \
+        -C ${D} .
+}
+addtask deploy after do_install before do_build

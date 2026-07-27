@@ -30,14 +30,6 @@ add_library(
   src/v_pace_db.c
 )
 
-## for YOCTO
-set(PROJECT_VERSION "0.1.0")
-set_target_properties(ackermann_hardware PROPERTIES
-    VERSION ${PROJECT_VERSION}
-    SOVERSION 0
-)
-
-
 target_compile_features(ackermann_hardware PUBLIC cxx_std_17)
 target_include_directories(ackermann_hardware PUBLIC
   $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/src/include>

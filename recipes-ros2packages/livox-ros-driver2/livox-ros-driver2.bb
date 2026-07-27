@@ -5,9 +5,7 @@ LICENSE = "CLOSED"
 inherit ros_distro_humble
 inherit ros_ament_cmake
 
-SRC_URI = "git://github.com/Livox-SDK/livox_ros_driver2.git;protocol=https;branch=master \
-           file://0001-fix-qa-so.patch \
-           "
+SRC_URI = "git://github.com/Livox-SDK/livox_ros_driver2.git;protocol=https;branch=master"
 SRCREV = "13eb05e4e6dd7a765b934d0c5fd6236676a57b49"
 
 S = "${WORKDIR}/git"
@@ -58,6 +56,10 @@ ROS_EXEC_DEPENDS = " \
 
 DEPENDS = "${ROS_BUILD_DEPENDS} livox-sdk2"
 RDEPENDS:${PN} = "${ROS_EXEC_DEPENDS} livox-sdk2"
+
+FILES_SOLIBSDEV = ""
+FILES:${PN} += "${ros_libdir}/*.so"
+INSANE_SKIP:${PN} += "dev-so"
 
 
 do_compile:prepend() {

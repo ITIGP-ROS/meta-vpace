@@ -1,0 +1,24 @@
+software =
+{
+    version = "@@DISTRO_VERSION@@";
+    description = "IVI application update payload";
+
+    @@MACHINE@@ = {
+        hardware-compatibility: [ "1.0" ]
+        files: (
+            {
+                filename = "ivi-app-@@MACHINE@@.tar.gz";
+                path = "/tmp/ivi-app.tar.gz";
+                properties = {create-destination = "true";};
+                sha256 = "$swupdate_get_sha256(ivi-app-@@MACHINE@@.tar.gz)";
+            }
+        );
+        scripts: (
+            {
+                filename = "install-ivi.lua";
+                type = "lua";
+                sha256 = "$swupdate_get_sha256(install-ivi.lua)";
+            }
+        );
+    };
+};

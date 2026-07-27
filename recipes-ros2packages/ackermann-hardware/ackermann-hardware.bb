@@ -32,3 +32,7 @@ ROS_EXEC_DEPENDS = " \
 
 DEPENDS = "${ROS_BUILD_DEPENDS}"
 RDEPENDS:${PN} += "${ROS_EXEC_DEPENDS}"
+
+FILES_SOLIBSDEV = ""
+FILES:${PN} += "${ros_libdir}/*.so"
+INSANE_SKIP:${PN} += "dev-so"

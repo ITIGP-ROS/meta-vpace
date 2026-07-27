@@ -1,0 +1,14 @@
+[connection]
+id=static-eth
+type=ethernet
+interface-name=enP8p1s0
+autoconnect=true
+
+[ipv4]
+method=manual
+addresses=10.42.0.50/24
+gateway=10.42.0.1
+dns=10.42.0.1
+
+[ipv6]
+method=disabled

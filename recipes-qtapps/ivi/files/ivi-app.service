@@ -7,11 +7,12 @@ Requires=weston.service
 Type=simple
 User=weston
 Group=weston
+Environment="LANG=C.UTF-8"
+Environment=QT_MEDIA_BACKEND=gstreamer
 Environment="QT_QPA_PLATFORM=wayland"
 Environment="QT_QPA_PLATFORMTHEME=gtk2"
 Environment="XDG_RUNTIME_DIR=/run/user/1000"
 Environment="WAYLAND_DISPLAY=wayland-1"
-Environment="QT_QPA_EGLFS_INTEGRATION=eglfs_kms"
 ExecStart=/bin/appIVI
 Restart=on-failure
 RestartSec=5

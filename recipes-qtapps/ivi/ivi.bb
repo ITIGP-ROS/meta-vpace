@@ -30,8 +30,13 @@ RDEPENDS:${PN} += " \
     qt5compat \
     qtsvg \
     qtimageformats \
+    qtdeclarative-qmlplugins \
 "
 
+# -- fonts ---
+RDEPENDS:${PN} += " \
+    ttf-noto-emoji-color \
+"
 
 # -- speech  ---
 RDEPENDS:${PN} += " vosk "
@@ -55,6 +60,7 @@ RDEPENDS:${PN} += " \
     gstreamer1.0-plugins-base \
     gstreamer1.0-plugins-good \
     gstreamer1.0-plugins-bad \
+    gstreamer1.0-libav \
     gstreamer1.0-plugins-nvvideo4linux2 \
     gstreamer1.0-plugins-nvvidconv \
     liberation-fonts \
@@ -67,10 +73,15 @@ do_install:append() {
     # Install Vosk model from git repo assets
     install -d ${D}/usr/assets/models/vosk
     cp -r ${S}/assets/models/vosk/* ${D}/usr/assets/models/vosk/
+
+
+    # Install an empty dir for persistent data (media)
+    install -d -m 0755 ${D}/var/lib/ivi/media
 }
 FILES:${PN} += " \
     /usr/assets/models/vosk \
     ${systemd_system_unitdir}/ivi-app.service \
+    /var/lib/ivi/media \
 "
 
 SYSTEMD_AUTO_ENABLE = "enable"

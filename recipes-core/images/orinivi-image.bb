@@ -41,7 +41,7 @@ IMAGE_INSTALL:append = " \
     kernel-module-hid-multitouch \
     "
 
-# --- OTA Agent ---
+# --- OTA  ---
 IMAGE_INSTALL:append = " ivi-ota-agent"
 
 

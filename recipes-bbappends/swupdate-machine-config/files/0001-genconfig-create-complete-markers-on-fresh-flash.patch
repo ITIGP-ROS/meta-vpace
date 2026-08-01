@@ -1,0 +1,16 @@
+--- a/swupdate-genconfig.sh.in
++++ b/swupdate-genconfig.sh.in
+@@ -41,6 +41,13 @@
+         echo "Moving incomplete marker at ${complete_marker_path_current_slot}-inprogress to complete marker after successful boot"
+         mv "${complete_marker_path_current_slot}-inprogress" ${complete_marker_path_current_slot}
+     fi
++    # Fresh flash: if current slot has no markers at all, this is
++    # the first boot after initial flash (not a capsule recovery)
++    if [ ! -e "${complete_marker_path_current_slot}" ] && [ ! -e "${complete_marker_path_current_slot}-inprogress" ]; then
++        echo "Fresh boot - creating complete markers for both slots"
++        touch "${complete_marker_path_current_slot}"
++        touch "${complete_marker_path_target_slot}"
++    fi
+     if ! systemctl status $(systemd-escape -p $(dirname ${complete_marker_path_target_slot}) --suffix=mount) > /dev/null; then
+         echo "Mount failed for ${complete_marker_path_target_slot}, forcing capsule update"
+         FORCE_CAPSULE_UPDATE=true

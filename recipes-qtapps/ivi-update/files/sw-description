@@ -1,6 +1,6 @@
 software =
 {
-    version = "@@DISTRO_VERSION@@";
+    version = "@@IVI_APP_VERSION@@";
     description = "IVI application update payload";
 
     @@MACHINE@@ = {

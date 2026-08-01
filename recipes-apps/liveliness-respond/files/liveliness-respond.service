@@ -1,0 +1,22 @@
+[Unit]
+Description=Node liveness responder (CAN 0x7A0 -> 0x7A2 echo)
+# can0 comes up via systemd-networkd (can-config). We do NOT hard-depend on
+# network-online: the app exits with a non-zero code if the interface is not
+# there yet and Restart=always brings it back until it is.
+After=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/liveliness_respond -i can0
+# The app must run at all times: a node that does not answer the ping is
+# reported as dead. Exit-on-missing-interface + Restart=always covers boot
+# ordering; short RestartSec so the node answers as soon as can0 is up.
+Restart=always
+RestartSec=2
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=liveliness-respond
+
+[Install]
+WantedBy=multi-user.target

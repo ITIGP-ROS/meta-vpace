@@ -59,6 +59,12 @@ PRIV_KEY="${IVI_OTA_PRIV_KEY:-/etc/ivi-ota/ivi_priv.pem}"
 log()  { echo "[ivi-ota] $*"; }
 warn() { echo "[ivi-ota] WARNING: $*" >&2; }
 
+_ros2_call() {
+    [ -f /opt/ros/humble/setup.bash ] && . /opt/ros/humble/setup.bash
+    command -v ros2 >/dev/null 2>&1 || return 0
+    ros2 service call "$@" >/dev/null 2>&1 || warn "ros2 service call $1 failed"
+}
+
 [ -r "$CONF" ] || {
     echo "[ivi-ota] ERROR: no $CONF — run deploy_ivi_agent.sh from the PC." >&2
     exit 1
@@ -345,6 +351,7 @@ handle() {
     # provisioned on this device, then runs the install handlers. THIS is where
     # trust is decided -- everything above only avoided wasting time.
     log "handing off to swupdate: swupdate $SWUPDATE_ARGS -i $_swu"
+    _ros2_call /update_coordinator/self_start std_srvs/srv/Trigger "{}"
     # shellcheck disable=SC2086
     if swupdate $SWUPDATE_ARGS -i "$_swu"; then
         log "update to $_ver applied"
@@ -364,6 +371,7 @@ handle() {
         report "R1|status|FAILED update to $_ver — see journalctl -u ivi-ota-agent"
         rm -rf "$WORKDIR/dl"
     fi
+    _ros2_call /update_coordinator/self_done std_srvs/srv/Trigger "{}"
 }
 
 # --- main --------------------------------------------------------------------

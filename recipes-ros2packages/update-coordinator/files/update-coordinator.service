@@ -1,0 +1,14 @@
+[Unit]
+Description=Update Coordinator — SecOC CAN-based ECU firmware update orchestration
+After=network.target can-config.service
+Wants=can-config.service
+
+[Service]
+Type=simple
+Environment=HOME=/root
+ExecStart=/bin/sh -c '. /opt/ros/humble/setup.bash && exec ros2 run update_coordinator update_coordinator --ros-args -p secoc_key:=/etc/ota_secoc.key -p can_iface:=can0'
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

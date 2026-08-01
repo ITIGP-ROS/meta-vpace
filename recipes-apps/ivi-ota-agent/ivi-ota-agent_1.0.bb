@@ -14,6 +14,9 @@ inherit systemd
 SYSTEMD_SERVICE:${PN} = "ivi-ota-agent.service"
 SYSTEMD_AUTO_ENABLE = "enable"
 
+PACKAGECONFIG ??= ""
+PACKAGECONFIG[ros2-coordination] = ",,,ros2cli update-coordinator"
+
 # mosquitto-clients -> mosquitto_sub / mosquitto_pub
 # curl              -> the download
 # openssl           -> RSA unwrap + AES decrypt + base64 (the agent uses
@@ -29,11 +32,16 @@ do_install() {
     install -d ${D}${systemd_system_unitdir}
     install -m 0644 ${WORKDIR}/ivi-ota-agent.service ${D}${systemd_system_unitdir}/ivi-ota-agent.service
 
-    # Created empty and root-only. The RSA private key and agent.conf are pushed
-    # at deploy time by deploy_ivi_agent.sh -- NEVER baked into the image. Baking
-    # them in ships secrets inside an artifact that gets copied around, and a
-    # rootfs update would wipe them anyway.
+    if ${@bb.utils.contains('PACKAGECONFIG', 'ros2-coordination', 'true', 'false', d)}; then
+        sed -i '/^After=/ s/$/ update-coordinator.service/' \
+            ${D}${systemd_system_unitdir}/ivi-ota-agent.service
+    fi
+
     install -d -m 0700 ${D}${sysconfdir}/ivi-ota
+    
+    install -m 0600 ${OTA_AGENT_PRIVATE_KEY_PATH} ${D}${sysconfdir}/ivi-ota/ivi_priv.pem
+
+    install -m 0600 ${OTA_AGENT_CONF_PATH} ${D}${sysconfdir}/ivi-ota/agent.conf
 }
 
 FILES:${PN} += "${systemd_system_unitdir}/ivi-ota-agent.service \

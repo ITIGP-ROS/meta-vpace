@@ -29,6 +29,13 @@ def generate_launch_description():
         ackermann_bringup_directory,'config','controllers.yaml'
     )
 
+    twist_mux_topics = os.path.join(
+        ackermann_bringup_directory, 'config', 'twist_mux_topics.yaml'
+    )
+    twist_mux_locks = os.path.join(
+        ackermann_bringup_directory, 'config', 'twist_mux_locks.yaml'
+    )
+
     pkg_path = get_package_share_directory('ackermann_description')
     xacro_file = os.path.join(pkg_path, 'urdf', 'robot.xacro')
     ackermann_description = Command(['xacro ', xacro_file,
@@ -40,6 +47,20 @@ def generate_launch_description():
         package='robot_state_publisher',
         executable='robot_state_publisher',
         parameters=[{'robot_description': ackermann_description, 'use_sim_time': False}],
+        output='screen'
+    )
+
+    twist_mux_node = Node(
+        package='twist_mux',
+        executable='twist_mux',
+        parameters=[twist_mux_topics, twist_mux_locks, {'use_sim_time': False}],
+        remappings=[('/cmd_vel_out', '/cmd_vel')],
+        output='screen'
+    )
+
+    emergency_stop_server = Node(
+        package='ackermann_bringup',
+        executable='emergency_stop_server',
         output='screen'
     )
 
@@ -111,6 +132,8 @@ def generate_launch_description():
             default_value=str(hardware_config['enc_counts_per_rev']),
             description='Encoder counts per wheel revolution'),
         rsp_node,
+        twist_mux_node,
+        emergency_stop_server,
         ekf_node,
         TimerAction(
             period=3.0,

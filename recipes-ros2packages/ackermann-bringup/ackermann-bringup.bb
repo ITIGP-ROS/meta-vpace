@@ -12,6 +12,9 @@ ROS_BUILD_DEPENDS = " \
     ament-cmake-native \
     rclcpp \
     geometry-msgs \
+    std-msgs \
+    std-srvs \
+    action-msgs \
 "
 
 # removed rviz and teleop as we sont be needing them on the project
@@ -38,6 +41,7 @@ ROS_EXEC_DEPENDS = " \
     joint-state-broadcaster \
     imu-sensor-broadcaster \
     ackermann-steering-controller \
+    twist-mux \
     robot-localization \
     pointcloud-to-laserscan \
     livox-ros-driver2 \

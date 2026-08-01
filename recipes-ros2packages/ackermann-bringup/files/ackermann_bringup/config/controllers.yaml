@@ -43,7 +43,7 @@ ackermann_controller:
     max_steering_angle: 0.373302 # 21.38 degrees, must match URDF limit
 
     # Controller params
-    reference_timeout: 2.0
+    reference_timeout: 0.1
     open_loop: false
     velocity_rolling_window_size: 10
     position_feedback: true

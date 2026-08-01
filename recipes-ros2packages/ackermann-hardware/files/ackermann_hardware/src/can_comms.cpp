@@ -68,7 +68,8 @@ void CanComms::send_hardware_reset()
     }
 }
 
-bool CanComms::read_sensor_values(int &l_enc, int &r_enc, double imu[6], bool &is_imu_reset)
+bool CanComms::read_sensor_values(int &l_enc, int &r_enc, double imu[6], bool &is_imu_reset,
+                                  SteeringFeedback &steer_fb)
 {
     struct can_frame frame;
     bool got_enc = false, got_imu1 = false, got_imu2 = false;
@@ -79,12 +80,23 @@ bool CanComms::read_sensor_values(int &l_enc, int &r_enc, double imu[6], bool &i
         if (nbytes != sizeof(struct can_frame)) break;
 
         switch (frame.can_id) {
-            case V_PACE_DB_ENCODER_DATA_FRAME_ID: {
-                struct v_pace_db_encoder_data_t msg;
-                v_pace_db_encoder_data_unpack(&msg, frame.data, frame.can_dlc);
+            case V_PACE_DB_VELOCITY_FEEDBACK_FRAME_ID: {
+                struct v_pace_db_velocity_feedback_t msg;
+                v_pace_db_velocity_feedback_unpack(&msg, frame.data, frame.can_dlc);
                 l_enc = msg.left_ticks;
                 r_enc = msg.right_ticks;
                 got_enc = true;
+                break;
+            }
+            case V_PACE_DB_STEERING_FEEDBACK_FRAME_ID: {
+                struct v_pace_db_steering_feedback_t msg;
+                v_pace_db_steering_feedback_unpack(&msg, frame.data, frame.can_dlc);
+                steer_fb.angle = v_pace_db_steering_feedback_steering_angle_decode(msg.steering_angle);
+                steer_fb.at_target = (msg.at_target == 1);
+                steer_fb.pot_fault = (msg.pot_fault == 1);
+                steer_fb.out_of_range = (msg.out_of_range == 1);
+                steer_fb.saturated = (msg.saturated == 1);
+                steer_fb.received = true;
                 break;
             }
             case V_PACE_DB_IMU_ACCEL_FRAME_ID: {
@@ -127,14 +139,14 @@ bool CanComms::read_sensor_values(int &l_enc, int &r_enc, double imu[6], bool &i
 void CanComms::set_motor_values(float left_vel, float right_vel)
 {
     struct can_frame frame {};
-    frame.can_id = V_PACE_DB_MOTOR_COMMANDS_FRAME_ID;
-    frame.can_dlc = V_PACE_DB_MOTOR_COMMANDS_LENGTH;
+    frame.can_id = V_PACE_DB_VELOCITY_COMMAND_FRAME_ID;
+    frame.can_dlc = V_PACE_DB_VELOCITY_COMMAND_LENGTH;
 
-    struct v_pace_db_motor_commands_t msg;
-    msg.left_vel = left_vel;
-    msg.right_vel = right_vel;
+    struct v_pace_db_velocity_command_t msg;
+    msg.left_vel_setpoint = left_vel;
+    msg.right_vel_setpoint = right_vel;
 
-    v_pace_db_motor_commands_pack(frame.data, &msg, sizeof(frame.data));
+    v_pace_db_velocity_command_pack(frame.data, &msg, sizeof(frame.data));
 
     ssize_t nbytes = write(socket_fd_, &frame, sizeof(struct can_frame));
     if (nbytes != sizeof(struct can_frame)) {
@@ -149,7 +161,7 @@ void CanComms::set_steering(float steer_angle)
     frame.can_dlc = V_PACE_DB_STEERING_COMMAND_LENGTH;
 
     struct v_pace_db_steering_command_t msg;
-    msg.steer_angle = steer_angle;
+    msg.steering_setpoint = steer_angle;
 
     v_pace_db_steering_command_pack(frame.data, &msg, sizeof(frame.data));
 

@@ -19,6 +19,16 @@ extern "C" {
 class CanComms
 {
 public:
+    struct SteeringFeedback
+    {
+        double angle = 0.0;
+        bool at_target = false;
+        bool pot_fault = false;
+        bool out_of_range = false;
+        bool saturated = false;
+        bool received = false;
+    };
+
     CanComms() = default;
     ~CanComms() { disconnect(); }
 
@@ -27,7 +37,8 @@ public:
     bool connected() const;
 
     void send_hardware_reset();
-    bool read_sensor_values(int &l_enc, int &r_enc, double imu[6], bool &is_imu_reset);
+    bool read_sensor_values(int &l_enc, int &r_enc, double imu[6], bool &is_imu_reset,
+                            SteeringFeedback &steer_fb);
     void set_motor_values(float left_vel, float right_vel);
     void set_steering(float steer_angle);
 

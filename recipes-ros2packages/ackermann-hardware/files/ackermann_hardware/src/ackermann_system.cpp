@@ -14,6 +14,7 @@
 
 #include "ackermann_hardware/ackermann_system.hpp"
 
+#include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <limits>
@@ -320,8 +321,29 @@ hardware_interface::return_type AckermannHardwareSystem::read(
   int l_enc = 0, r_enc = 0;
   double imu_data[6] = {0.0};
   bool is_imu_reset = false;
+  CanComms::SteeringFeedback steer_fb;
   
-  if (can_comms_.read_sensor_values(l_enc, r_enc, imu_data, is_imu_reset))
+  bool got_sensors = can_comms_.read_sensor_values(l_enc, r_enc, imu_data, is_imu_reset, steer_fb);
+
+  // Steering position comes from the rack-mounted pot (real Ackermann geometry),
+  // regardless of encoder/IMU frame freshness.
+  static bool prev_pot_fault = false;
+  static bool prev_out_of_range = false;
+  if (steer_fb.received) {
+      if (steer_fb.pot_fault && !prev_pot_fault) {
+          RCLCPP_WARN(rclcpp::get_logger("AckermannHardwareSystem"),
+                      "Steering pot fault detected! Steering feedback unreliable.");
+      }
+      if (steer_fb.out_of_range && !prev_out_of_range) {
+          RCLCPP_WARN(rclcpp::get_logger("AckermannHardwareSystem"),
+                      "Steering command exceeded mechanical travel and was clamped!");
+      }
+      steering_.set_rack_position(steer_fb.angle);
+  }
+  prev_pot_fault = steer_fb.pot_fault;
+  prev_out_of_range = steer_fb.out_of_range;
+  
+  if (got_sensors)
   {
       static bool prev_imu_reset = false;
       if (is_imu_reset && !prev_imu_reset) {
@@ -340,8 +362,6 @@ hardware_interface::return_type AckermannHardwareSystem::read(
     imu_gyro_[0] = imu_data[3];
     imu_gyro_[1] = imu_data[4];
     
-    // GyroZ is already inverted to robot frame by Tiva-C firmware (DBC spec).
-    // No host-side inversion needed.
     double raw_gyro_z = imu_data[5];
     
     if (is_imu_calibrating_) {
@@ -386,8 +406,7 @@ hardware_interface::return_type AckermannHardwareSystem::read(
     wheel_r_.vel = 0.0;
   }
 
-  // Fake steering position due to lack of servo encoder
-  steering_.update(delta_seconds);
+  // Steering position is set from the steering pot feedback above
 
   return hardware_interface::return_type::OK;
 }
@@ -401,7 +420,11 @@ hardware_interface::return_type AckermannHardwareSystem::write(
   }
 
   double avg_steer_angle = steering_.get_average_steering_cmd();
-  
+
+  // Safety clamp on the host side; Tiva's hardware clamp is a second line of defense
+  constexpr double MAX_STEERING_ANGLE = 0.373302; // 21.38 degrees, matches URDF limit
+  avg_steer_angle = std::clamp(avg_steer_angle, -MAX_STEERING_ANGLE, MAX_STEERING_ANGLE);
+
   // Send physical steering angle in radians directly.
   // Tiva-C handles angle->PWM mapping locally per DBC.
   can_comms_.set_steering(static_cast<float>(avg_steer_angle));

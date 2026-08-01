@@ -1,28 +1,40 @@
 /*
- * wifi_cred_send.cpp — send WiFi credentials to the QNX host over CAN,
- * authenticated with SecOC (truncated AES-128-CMAC + freshness), segmented
- * with ISO-TP (ISO 15765-2). Runs on Linux/SocketCAN (Jetson, PC, anything).
+ * wifi_cred_send.cpp — send WiFi credentials over CAN, authenticated with SecOC
+ * (truncated AES-128-CMAC + freshness), segmented with ISO-TP (ISO 15765-2).
+ * Runs on Linux/SocketCAN (Jetson, PC, anything).
  *
- * This is the SENDER half of the receiver in qnx-host/can/{wifi_cred.c,isotp_rx.c}.
- * The wire format is dictated by that receiver — do not change it here alone:
+ * TWO RECEIVERS NEED THESE CREDENTIALS, and each gets its OWN ISO-TP session:
+ *
+ *   cluster   0x205 us -> QNX host    0x206 host  -> us   (Flow Control)
+ *   esp32     0x207 us -> ESP32 ECU   0x208 esp32 -> us   (Flow Control)
+ *
+ * They are NOT one broadcast. ISO-TP Flow Control is point-to-point: if both
+ * receivers answered FC on a shared ID they would be two transmitters on one
+ * ID. They emit identical CTS frames today, so it appears to work — but the
+ * moment one needs to send Wait (0x31) or Overflow (0x32) the frames diverge
+ * mid-transmission and the bus takes bit errors. Hence -t/--target, and hence
+ * `--target both` sends the payload twice rather than once.
+ *
+ * This is the SENDER half of the receivers in qnx-host/can/{wifi_cred.c,
+ * isotp_rx.c} and the ESP32's src/logs/can.c. The wire format is dictated by
+ * those receivers — do not change it here alone:
  *
  *   payload = "SSID;PASSWORD" || freshness(4 B, big-endian) || MAC(4 B)
  *   MAC     = AES-128-CMAC(key, "SSID;PASSWORD" || freshness)[0..3]
  *
- *   CAN 0x205  us -> host   Single/First/Consecutive frames
- *   CAN 0x206  host -> us   Flow Control (host answers BS=0, STmin=0)
- *
- * The host accepts a message only if the MAC verifies AND the freshness is
+ * A receiver accepts a message only if the MAC verifies AND the freshness is
  * STRICTLY GREATER than the last value it accepted (persisted across reboot),
  * so every send must use a larger counter than the previous one. We default to
  * max(unix time, last_sent+1), which is monotonic without needing to know what
- * the host currently holds.
+ * either receiver currently holds. The two receivers keep INDEPENDENT floors,
+ * so they do not have to agree on the number.
  *
  * The AES-CMAC comes from the same aes_cmac.c the QNX side compiles, so the two
  * implementations cannot drift apart.
  *
  * Build:  make          (see Makefile)
  * Usage:  ./wifi_cred_send -i can0 -k secoc.key -s MySSID -p MyPassword
+ *         ./wifi_cred_send ... --target both      (provision host AND ESP32)
  */
 
 #include <cstdio>
@@ -50,8 +62,23 @@ extern "C" {
 
 /* ------------------------------ wire constants ---------------------------- */
 
-static const canid_t CAN_ID_CREDS = 0x205;   /* us  -> host (SF/FF/CF)        */
-static const canid_t CAN_ID_FC    = 0x206;   /* host -> us  (Flow Control)    */
+/* ISO-TP is point-to-point: exactly one node may answer Flow Control per
+ * session. So each receiver owns an ID pair and we send the credentials once
+ * per receiver, rather than broadcasting one message both would answer.
+ *
+ *   cluster  0x205 / 0x206   QNX host, qnx-host/can/wifi_cred.c
+ *   esp32    0x207 / 0x208   ESP32 ECU, common/config.h
+ *
+ * Set from -t/--target (or --cred-id/--fc-id) before any frame is built, hence
+ * not const. */
+static canid_t CAN_ID_CREDS = 0x205;         /* us -> receiver  (SF/FF/CF)    */
+static canid_t CAN_ID_FC    = 0x206;         /* receiver -> us  (Flow Control)*/
+
+struct Target { const char *name; canid_t creds; canid_t fc; };
+static const Target TARGETS[] = {
+    { "cluster", 0x205, 0x206 },
+    { "esp32",   0x207, 0x208 },
+};
 
 static const size_t  MAC_TRUNC    = 4;       /* truncated SecOC tag length    */
 static const size_t  FV_LEN       = 4;       /* freshness counter length      */
@@ -75,11 +102,24 @@ enum {
 
 struct Opts {
     std::string iface   = "can0";
-    std::string keypath = "/etc/wifi_secoc.key";
+    std::string keypath = "secoc.key";
     std::string fvpath  = "/var/lib/wifi_cred_txfv";
     std::string ssid;
     std::string pass;
+    /* Defaults to BOTH: on this vehicle the Jetson is the provisioning source
+     * for the QNX host AND the ESP32, so a caller that says nothing wants both
+     * provisioned. Defaulting to one receiver means any caller that forgets the
+     * flag silently leaves the other without credentials, which is a failure
+     * mode nobody notices until the ESP32 will not join the network.
+     *
+     * Consequence to know about: if one receiver is powered off, its send waits
+     * N_BS_MS for flow control and the tool exits EXIT_TRANSFER even though the
+     * other receiver was provisioned fine. Use --json to see per-target results
+     * (one line each, with its own ok/code) rather than judging by exit code. */
+    std::string target  = "both";   /* cluster | esp32 | both           */
     uint32_t    fv        = 0;      /* 0 = auto (time-based, monotonic) */
+    long        cred_id   = -1;     /* >=0 overrides the target preset  */
+    long        fc_id     = -1;
     bool        verbose   = false;
     bool        dry_run   = false;
     bool        use_stdin = false;  /* read creds from stdin, not argv  */
@@ -93,15 +133,20 @@ static void usage(const char *argv0)
         "       %s --stdin [options]      < creds.txt\n"
         "\n"
         "  -i <iface>    CAN interface            (default can0)\n"
-        "  -k <file>     16-byte or 32-hex key    (default /etc/wifi_secoc.key)\n"
+        "  -k <file>     16-byte or 32-hex key    (default secoc.key)\n"
         "  -s <ssid>     WiFi SSID\n"
         "  -p <pass>     WiFi password\n"
         "  --stdin       read SSID on line 1 and password on line 2 from stdin\n"
         "                instead of -s/-p. USE THIS FROM GUI/SERVICE CODE: an\n"
         "                argv password is visible to every user via `ps aux`.\n"
+        "  -t, --target  who receives them: cluster (0x205/0x206, default),\n"
+        "                esp32 (0x207/0x208), or both (sent in sequence)\n"
+        "  --cred-id <n> override the credential CAN ID (single target only)\n"
+        "  --fc-id <n>   override the flow-control CAN ID\n"
         "  -f <n>        explicit freshness value (default: auto, monotonic)\n"
         "  -F <file>     freshness state file     (default /var/lib/wifi_cred_txfv)\n"
-        "  -j, --json    print one JSON line with the result (for programmatic use)\n"
+        "  -j, --json    print one JSON line with the result (one line PER TARGET\n"
+        "                when --target both)\n"
         "  -n            dry run: build and print frames, send nothing\n"
         "  -v            verbose (hex dumps, per-frame trace)\n"
         "\n"
@@ -138,12 +183,14 @@ static std::string json_escape(const std::string &s)
 
 /* Single-line JSON result. The password is NEVER included. */
 static void emit_json(bool ok, int code, const std::string &msg,
-                      const std::string &ssid, uint32_t fv, size_t bytes)
+                      const std::string &ssid, uint32_t fv, size_t bytes,
+                      const char *target = "cluster")
 {
     printf("{\"ok\":%s,\"code\":%d,\"message\":\"%s\","
-           "\"ssid\":\"%s\",\"freshness\":%u,\"payload_bytes\":%zu}\n",
+           "\"ssid\":\"%s\",\"freshness\":%u,\"payload_bytes\":%zu,"
+           "\"target\":\"%s\"}\n",
            ok ? "true" : "false", code, json_escape(msg).c_str(),
-           json_escape(ssid).c_str(), fv, bytes);
+           json_escape(ssid).c_str(), fv, bytes, target);
     fflush(stdout);
 }
 
@@ -471,28 +518,61 @@ int main(int argc, char **argv)
     Opts o;
 
     static const struct option longopts[] = {
-        {"stdin", no_argument,       nullptr, 1000},
-        {"json",  no_argument,       nullptr, 'j'},
-        {"help",  no_argument,       nullptr, 'h'},
+        {"stdin",   no_argument,       nullptr, 1000},
+        {"json",    no_argument,       nullptr, 'j'},
+        {"target",  required_argument, nullptr, 't'},
+        {"cred-id", required_argument, nullptr, 1001},
+        {"fc-id",   required_argument, nullptr, 1002},
+        {"help",    no_argument,       nullptr, 'h'},
         {nullptr, 0,                 nullptr, 0}
     };
 
     int c;
-    while ((c = getopt_long(argc, argv, "i:k:s:p:f:F:jnvh", longopts, nullptr)) != -1) {
+    while ((c = getopt_long(argc, argv, "i:k:s:p:t:f:F:jnvh", longopts, nullptr)) != -1) {
         switch (c) {
         case 'i':  o.iface     = optarg; break;
         case 'k':  o.keypath   = optarg; break;
         case 's':  o.ssid      = optarg; break;
         case 'p':  o.pass      = optarg; break;
+        case 't':  o.target    = optarg; break;
         case 'f':  o.fv        = (uint32_t)strtoul(optarg, nullptr, 0); break;
         case 'F':  o.fvpath    = optarg; break;
         case 'j':  o.json      = true;   break;
         case 'n':  o.dry_run   = true;   break;
         case 'v':  o.verbose   = true;   break;
         case 1000: o.use_stdin = true;   break;
+        case 1001: o.cred_id   = strtol(optarg, nullptr, 0); break;
+        case 1002: o.fc_id     = strtol(optarg, nullptr, 0); break;
         case 'h':  usage(argv[0]); return EXIT_OK;
         default:   usage(argv[0]); return EXIT_USAGE;
         }
+    }
+
+    /* Resolve --target / --cred-id / --fc-id into the list of sends to perform. */
+    std::vector<Target> sends;
+    bool overridden = (o.cred_id >= 0 || o.fc_id >= 0);
+
+    if (o.target == "both") {
+        if (overridden) {
+            fprintf(stderr, "error: --cred-id/--fc-id cannot be combined with "
+                            "--target both\n");
+            return EXIT_USAGE;
+        }
+        for (const Target &t : TARGETS) sends.push_back(t);
+    } else {
+        const Target *base = nullptr;
+        for (const Target &t : TARGETS)
+            if (o.target == t.name) { base = &t; break; }
+        if (!base) {
+            fprintf(stderr, "error: unknown target '%s' (want cluster, esp32 or both)\n",
+                    o.target.c_str());
+            return EXIT_USAGE;
+        }
+        Target t = *base;
+        if (o.cred_id >= 0) t.creds = (canid_t)o.cred_id;
+        if (o.fc_id   >= 0) t.fc    = (canid_t)o.fc_id;
+        if (overridden)     t.name  = "custom";
+        sends.push_back(t);
     }
 
     if (o.use_stdin) {
@@ -527,67 +607,86 @@ int main(int argc, char **argv)
         return EXIT_KEY;
     }
 
-    uint32_t fv = o.fv ? o.fv : next_freshness(o.fvpath);
-
-    std::vector<uint8_t> payload = build_payload(o.ssid, o.pass, fv, key,
-                                                 o.verbose && !o.json);
-
-    if (payload.size() > ISOTP_MAX) {
-        char m[128];
-        snprintf(m, sizeof m, "payload %zu B exceeds the receiver limit of %zu B",
-                 payload.size(), ISOTP_MAX);
-        if (o.json) emit_json(false, EXIT_PAYLOAD, m, o.ssid, fv, payload.size());
-        else fprintf(stderr, "error: %s\n", m);
-        return EXIT_PAYLOAD;
-    }
-
-    if (!o.json) {
-        printf("SSID      : %s\n", o.ssid.c_str());
-        printf("password  : %zu chars\n", o.pass.size());
-        printf("freshness : %u\n", fv);
-        printf("payload   : %zu bytes (creds %zu + fv %zu + mac %zu)\n",
-               payload.size(), payload.size() - FV_LEN - MAC_TRUNC, FV_LEN, MAC_TRUNC);
-        printf("interface : %s   ids: creds 0x%03X, flow-control 0x%03X\n",
-               o.iface.c_str(), CAN_ID_CREDS, CAN_ID_FC);
-        if (o.verbose) hexdump("full payload (on the wire)",
-                               payload.data(), payload.size());
-    }
-
-    int s = -1;
-    if (!o.dry_run) {
-        s = can_open(o.iface);
-        if (s < 0) {
-            if (o.json) emit_json(false, EXIT_CAN,
-                                  "cannot open CAN interface '" + o.iface + "'",
-                                  o.ssid, fv, payload.size());
-            return EXIT_CAN;
-        }
-    }
-
     /* Trace frames when asked (-v) or when dry-running for a human, but never
      * in --json mode: the caller parses stdout. */
     bool trace = (o.verbose || o.dry_run) && !o.json;
-    bool ok = isotp_send(s, payload, trace, o.dry_run);
-    if (s >= 0) close(s);
+    int  first_failure = EXIT_OK;
 
-    if (!ok) {
-        const char *m = "transfer failed (no flow control, refused, or write error)";
-        if (o.json) emit_json(false, EXIT_TRANSFER, m, o.ssid, fv, payload.size());
-        else fprintf(stderr, "\nFAILED — %s\n", m);
-        return EXIT_TRANSFER;
+    for (const Target &t : sends) {
+        CAN_ID_CREDS = t.creds;
+        CAN_ID_FC    = t.fc;
+
+        /* Each receiver keeps its own freshness floor, so consuming one value
+         * per send is correct — they need not agree on the number. */
+        uint32_t fv = o.fv ? o.fv : next_freshness(o.fvpath);
+
+        std::vector<uint8_t> payload = build_payload(o.ssid, o.pass, fv, key,
+                                                     o.verbose && !o.json);
+
+        if (payload.size() > ISOTP_MAX) {
+            char m[128];
+            snprintf(m, sizeof m, "payload %zu B exceeds the receiver limit of %zu B",
+                     payload.size(), ISOTP_MAX);
+            if (o.json) emit_json(false, EXIT_PAYLOAD, m, o.ssid, fv, payload.size(), t.name);
+            else fprintf(stderr, "error: %s\n", m);
+            return EXIT_PAYLOAD;      /* size is target-independent: retrying is pointless */
+        }
+
+        if (!o.json) {
+            if (sends.size() > 1) printf("\n--- target: %s ---\n", t.name);
+            printf("SSID      : %s\n", o.ssid.c_str());
+            printf("password  : %zu chars\n", o.pass.size());
+            printf("freshness : %u\n", fv);
+            printf("payload   : %zu bytes (creds %zu + fv %zu + mac %zu)\n",
+                   payload.size(), payload.size() - FV_LEN - MAC_TRUNC, FV_LEN, MAC_TRUNC);
+            printf("interface : %s   ids: creds 0x%03X, flow-control 0x%03X\n",
+                   o.iface.c_str(), CAN_ID_CREDS, CAN_ID_FC);
+            if (o.verbose) hexdump("full payload (on the wire)",
+                                   payload.data(), payload.size());
+        }
+
+        int s = -1;
+        if (!o.dry_run) {
+            s = can_open(o.iface);
+            if (s < 0) {
+                if (o.json) emit_json(false, EXIT_CAN,
+                                      "cannot open CAN interface '" + o.iface + "'",
+                                      o.ssid, fv, payload.size(), t.name);
+                return EXIT_CAN;      /* the interface will not fix itself */
+            }
+        }
+
+        bool ok = isotp_send(s, payload, trace, o.dry_run);
+        if (s >= 0) close(s);
+
+        if (!ok) {
+            char m[192];
+            snprintf(m, sizeof m,
+                     "transfer failed (no flow control, refused, or write error) — "
+                     "is the %s receiver powered and listening on 0x%03X?",
+                     t.name, CAN_ID_CREDS);
+            if (o.json) emit_json(false, EXIT_TRANSFER, m, o.ssid, fv, payload.size(), t.name);
+            else fprintf(stderr, "\nFAILED [%s] — %s\n", t.name, m);
+            /* Keep going: one dead receiver must not stop us provisioning the other. */
+            if (first_failure == EXIT_OK) first_failure = EXIT_TRANSFER;
+            continue;
+        }
+
+        /* Only bump our stored counter once the frames actually went out, so a
+         * failed attempt does not burn a freshness value. */
+        if (!o.dry_run && !o.fv) store_last_fv(o.fvpath, fv);
+
+        if (o.json) {
+            std::string msg = std::string("delivered to the ") + t.name +
+                              " ISO-TP receiver";
+            emit_json(true, EXIT_OK, msg, o.ssid, fv, payload.size(), t.name);
+        } else {
+            printf("\nSent to %s. The receiver verifies the MAC and requires "
+                   "freshness > its last accepted value.\n", t.name);
+        }
     }
 
-    /* Only bump our stored counter once the frames actually went out, so a
-     * failed attempt does not burn a freshness value. */
-    if (!o.dry_run && !o.fv) store_last_fv(o.fvpath, fv);
-
-    if (o.json) {
-        emit_json(true, EXIT_OK, "delivered to the host ISO-TP receiver",
-                  o.ssid, fv, payload.size());
-    } else {
-        printf("\nSent. The host verifies the MAC and requires freshness > its last "
-               "accepted value;\ncheck the bridge log for the result "
-               "(e.g. slog2info -b can_udp | grep -i wifi).\n");
-    }
-    return EXIT_OK;
+    if (first_failure == EXIT_OK && !o.json && sends.size() > 1)
+        printf("\nAll targets delivered.\n");
+    return first_failure;
 }

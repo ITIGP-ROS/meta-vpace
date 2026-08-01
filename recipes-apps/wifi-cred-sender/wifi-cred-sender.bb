@@ -1,6 +1,8 @@
-SUMMARY = "SecOC WiFi-credential sender: pushes SSID/password to the QNX host over CAN"
-DESCRIPTION = "Sends 'SSID;PASSWORD' on CAN 0x205 using ISO-TP segmentation, \
-authenticated with a truncated AES-128-CMAC and a monotonic freshness counter."
+SUMMARY = "SecOC WiFi-credential sender: pushes SSID/password to the QNX host and the ESP32 over CAN"
+DESCRIPTION = "Sends 'SSID;PASSWORD' using ISO-TP segmentation, authenticated \
+with a truncated AES-128-CMAC and a monotonic freshness counter. Two receivers, \
+one ISO-TP session each: the QNX host on 0x205/0x206 and the ESP32 body ECU on \
+0x207/0x208. Select with -t/--target cluster|esp32|both."
 LICENSE = "CLOSED"
 LIC_FILES_CHKSUM = ""
 

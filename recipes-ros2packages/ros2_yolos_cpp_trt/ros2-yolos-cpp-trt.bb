@@ -1,5 +1,5 @@
-DESCRIPTION = "ROS 2 Wrapper for YOLOs-CPP Inference Library"
-MAINTAINER = "YOLOs-CPP Team <abdalrahman.m5959@gmail.com>"
+DESCRIPTION = "ROS 2 Wrapper for YOLOs-CPP Inference Library (TensorRT backend)"
+MAINTAINER = "Youhana Beshay <youhanabeshay@gmail.com>"
 LICENSE = "AGPL-3.0-only"
 LIC_FILES_CHKSUM = "file://LICENSE;md5=eb1e647870add0502f8f010b19de32af"
 
@@ -7,12 +7,13 @@ inherit ros_distro_humble
 inherit ros_ament_cmake
 inherit cuda
 
-SRC_URI = "git://github.com/Geekgineer/ros2_yolos_cpp.git;protocol=https;branch=main"
-SRCREV = "226a475e37958b90a0e45ea227dd045b968baaab"
+SRC_URI = "git://github.com/YouhanaBeshay/ros2_yolos_cpp_trt.git;protocol=https;branch=dev"
+SRCREV = "b16e454654551e104693084821164b9e3bf181ca"
 
 S = "${WORKDIR}/git"
 
-EXTRA_OECMAKE += "-DCMAKE_BUILD_TYPE=Release"
+CUDA_ARCHITECTURES = "87"
+EXTRA_OECMAKE += "-DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF"
 
 ROS_BUILD_DEPENDS = " \
     ament-cmake-native \
@@ -44,10 +45,8 @@ ROS_EXEC_DEPENDS = " \
     rosidl-default-runtime \
 "
 
-DEPENDS = "${ROS_BUILD_DEPENDS} patchelf-native"
-RDEPENDS:${PN} = "${ROS_EXEC_DEPENDS}"
-
-do_configure[network] = "1"
+DEPENDS = "${ROS_BUILD_DEPENDS} tensorrt-core"
+RDEPENDS:${PN} = "${ROS_EXEC_DEPENDS} tensorrt-core"
 
 do_compile:prepend() {
     export ROS_DISTRO="humble"
@@ -60,20 +59,7 @@ FILES:${PN} += " \
     ${ros_datadir}/${ROS_BPN}/config \
 "
 
-do_install:append() {
-    if [ -d "${B}/onnxruntime/lib" ]; then
-        install -d ${D}${ros_libdir}
-        for f in ${B}/onnxruntime/lib/libonnxruntime.so*; do
-            [ -e "$f" ] && install -m 0755 "$f" ${D}${ros_libdir}/
-        done
-    fi
-
-    if [ -f "${D}${ros_libdir}/libros2_yolos_cpp_components.so" ]; then
-        patchelf --set-rpath '$ORIGIN' ${D}${ros_libdir}/libros2_yolos_cpp_components.so
-    fi
-}
-
 DEBUG_PREFIX_MAP = "-fdebug-prefix-map=${WORKDIR}=/usr/src/debug/${PN}-${PV}"
 TARGET_CC_ARCH += "${DEBUG_PREFIX_MAP}"
 
-INSANE_SKIP:${PN} += "already-stripped dev-so file-rdeps buildpaths"
+INSANE_SKIP:${PN} += "already-stripped dev-so buildpaths"

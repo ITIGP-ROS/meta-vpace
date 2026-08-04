@@ -64,6 +64,9 @@ IMAGE_INSTALL:append = " nm-config "
 # Wifi-credential sender (pushes SSID/password)
 IMAGE_INSTALL:append = " wifi-cred-sender "
 
+# CAN node-liveness responder (echoes host ping 0x7A0 -> 0x7A2)
+IMAGE_INSTALL:append = " liveliness-respond "
+
 # --- Qt6 multimedia config ---
 PACKAGECONFIG:append:pn-qtmultimedia = " gstreamer alsa pulseaudio "
 PACKAGECONFIG:append:pn-pulseaudio   = " systemd "

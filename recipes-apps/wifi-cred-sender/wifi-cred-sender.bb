@@ -13,6 +13,7 @@ SRC_URI = "\
     file://aes_cmac.c \
     file://aes_cmac.h \
     file://secoc.key \
+    file://wifi-cred-tmpfiles.conf \
 "
 
 # Portable across Yocto releases: scarthgap+ defines UNPACKDIR (files land in
@@ -36,9 +37,14 @@ do_install() {
 
     # Install the secret key
     install -d ${D}${sysconfdir}
-    install -m 0400 ${S}/secoc.key ${D}${sysconfdir}/wifi_secoc.key
+    install -m 0444 ${S}/secoc.key ${D}${sysconfdir}/wifi_secoc.key
+
+    # Pre-create the freshness state file as the weston user at boot, so the
+    # IVI app (runs as weston) can persist the counter to /var/lib.
+    install -d ${D}${nonarch_libdir}/tmpfiles.d
+    install -m 0644 ${S}/wifi-cred-tmpfiles.conf ${D}${nonarch_libdir}/tmpfiles.d/
 
     install -d ${D}${FVDIR}
 }
 
-FILES:${PN} += "${sysconfdir}/wifi_secoc.key"
+FILES:${PN} += "${sysconfdir}/wifi_secoc.key ${nonarch_libdir}/tmpfiles.d"

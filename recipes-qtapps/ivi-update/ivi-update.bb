@@ -11,7 +11,7 @@ SRC_URI = " \
 S = "${WORKDIR}/${PN}"
 
 
-IVI_APP_VERSION = "1.0.2"
+IVI_APP_VERSION = "1.0.3"
 
 # Depend on ivi to produce the tarball
 IMAGE_DEPENDS = "ivi"

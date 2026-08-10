@@ -15,6 +15,7 @@ ROS_BUILD_DEPENDS = " \
     std-msgs \
     std-srvs \
     action-msgs \
+    nav2-msgs \
 "
 
 # removed rviz and teleop as we sont be needing them on the project
@@ -72,3 +73,10 @@ ROS_EXEC_DEPENDS += " \
 
 DEPENDS = "${ROS_BUILD_DEPENDS}"
 RDEPENDS:${PN} += "${ROS_EXEC_DEPENDS}"
+
+# for swupdate (bundled by ackermann-update)
+do_deploy() {
+    tar czf ${DEPLOY_DIR_IMAGE}/ackermann-bringup-${MACHINE}.tar.gz \
+        -C ${D} .
+}
+addtask deploy after do_install before do_build

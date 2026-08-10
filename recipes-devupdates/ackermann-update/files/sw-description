@@ -1,0 +1,36 @@
+software =
+{
+    version = "@@ACKERMANN_VERSION@@";
+    description = "Ackermann stack update payload (description + bringup + hardware)";
+
+    @@MACHINE@@ = {
+        hardware-compatibility: [ "1.0" ]
+        files: (
+            {
+                filename = "ackermann-description-@@MACHINE@@.tar.gz";
+                path = "/tmp/ackermann-description.tar.gz";
+                properties = {create-destination = "true";};
+                sha256 = "$swupdate_get_sha256(ackermann-description-@@MACHINE@@.tar.gz)";
+            },
+            {
+                filename = "ackermann-bringup-@@MACHINE@@.tar.gz";
+                path = "/tmp/ackermann-bringup.tar.gz";
+                properties = {create-destination = "true";};
+                sha256 = "$swupdate_get_sha256(ackermann-bringup-@@MACHINE@@.tar.gz)";
+            },
+            {
+                filename = "ackermann-hardware-@@MACHINE@@.tar.gz";
+                path = "/tmp/ackermann-hardware.tar.gz";
+                properties = {create-destination = "true";};
+                sha256 = "$swupdate_get_sha256(ackermann-hardware-@@MACHINE@@.tar.gz)";
+            }
+        );
+        scripts: (
+            {
+                filename = "install-ackermann.lua";
+                type = "lua";
+                sha256 = "$swupdate_get_sha256(install-ackermann.lua)";
+            }
+        );
+    };
+};

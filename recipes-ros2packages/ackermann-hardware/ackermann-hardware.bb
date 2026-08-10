@@ -36,3 +36,10 @@ RDEPENDS:${PN} += "${ROS_EXEC_DEPENDS}"
 FILES_SOLIBSDEV = ""
 FILES:${PN} += "${ros_libdir}/*.so"
 INSANE_SKIP:${PN} += "dev-so"
+
+# for swupdate (bundled by ackermann-update)
+do_deploy() {
+    tar czf ${DEPLOY_DIR_IMAGE}/ackermann-hardware-${MACHINE}.tar.gz \
+        -C ${D} .
+}
+addtask deploy after do_install before do_build

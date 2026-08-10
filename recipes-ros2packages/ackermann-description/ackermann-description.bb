@@ -13,3 +13,10 @@ ROS_EXEC_DEPENDS = "xacro"
 
 DEPENDS = "${ROS_BUILD_DEPENDS}"
 RDEPENDS:${PN} += "${ROS_EXEC_DEPENDS}"
+
+# for swupdate (bundled by ackermann-update)
+do_deploy() {
+    tar czf ${DEPLOY_DIR_IMAGE}/ackermann-description-${MACHINE}.tar.gz \
+        -C ${D} .
+}
+addtask deploy after do_install before do_build

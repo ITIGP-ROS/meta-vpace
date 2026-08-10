@@ -12,6 +12,7 @@ find_package(geometry_msgs REQUIRED)
 find_package(std_msgs REQUIRED)
 find_package(std_srvs REQUIRED)
 find_package(action_msgs REQUIRED)
+find_package(nav2_msgs REQUIRED)
 
 
 add_executable(emergency_stop_server src/emergency_stop_server.cpp)
@@ -26,6 +27,16 @@ ament_target_dependencies(emergency_stop_server
   action_msgs
 )
 install(TARGETS emergency_stop_server
+  DESTINATION lib/${PROJECT_NAME}
+)
+
+add_executable(road_classification_node src/road_classification_node.cpp)
+target_include_directories(road_classification_node PRIVATE src)
+ament_target_dependencies(road_classification_node
+  rclcpp
+  nav2_msgs
+)
+install(TARGETS road_classification_node
   DESTINATION lib/${PROJECT_NAME}
 )
 

@@ -36,6 +36,10 @@ def generate_launch_description():
         ackermann_bringup_directory, 'config', 'twist_mux_locks.yaml'
     )
 
+    road_classification_config = os.path.join(
+        ackermann_bringup_directory, 'config', 'road_classification.yaml'
+    )
+
     pkg_path = get_package_share_directory('ackermann_description')
     xacro_file = os.path.join(pkg_path, 'urdf', 'robot.xacro')
     ackermann_description = Command(['xacro ', xacro_file,
@@ -61,6 +65,14 @@ def generate_launch_description():
     emergency_stop_server = Node(
         package='ackermann_bringup',
         executable='emergency_stop_server',
+        output='screen'
+    )
+
+    road_classification_node = Node(
+        package='ackermann_bringup',
+        executable='road_classification_node',
+        parameters=[road_classification_config,
+                    {'can_interface': can_interface}],
         output='screen'
     )
 
@@ -134,6 +146,7 @@ def generate_launch_description():
         rsp_node,
         twist_mux_node,
         emergency_stop_server,
+        road_classification_node,
         ekf_node,
         TimerAction(
             period=3.0,

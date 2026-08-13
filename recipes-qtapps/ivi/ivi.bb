@@ -2,7 +2,7 @@ SUMMARY = "ITI Qt6 IVI Application"
 LICENSE = "CLOSED"
 
 SRC_URI = " \
-    git://github.com/ITIGP-ROS/IVI.git;protocol=https;branch=Detections3D \
+    git://github.com/ITIGP-ROS/IVI.git;protocol=https;branch=main \
     file://ivi-app.service \
     file://ivi-tmpfiles.conf \
 "

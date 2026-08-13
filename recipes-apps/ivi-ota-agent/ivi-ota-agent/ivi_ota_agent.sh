@@ -62,7 +62,14 @@ warn() { echo "[ivi-ota] WARNING: $*" >&2; }
 _ros2_call() {
     [ -f /opt/ros/humble/setup.bash ] && . /opt/ros/humble/setup.bash
     command -v ros2 >/dev/null 2>&1 || return 0
-    ros2 service call "$@" >/dev/null 2>&1 || warn "ros2 service call $1 failed"
+    _err=$(ros2 service call "$@" 2>&1 >/dev/null)
+    _rc=$?
+    [ "$_rc" -eq 0 ] || {
+        _err=$(printf '%s\n' "$_err" | tail -n 1)
+        warn "ros2 service call $1 failed: $_err"
+        return 1
+    }
+    return 0
 }
 
 # --- vehicle lock ------------------------------------------------------------

@@ -6,7 +6,7 @@ Wants=can-config.service
 [Service]
 Type=simple
 Environment=HOME=/root
-ExecStart=/bin/sh -c '. /opt/ros/humble/setup.bash && exec ros2 run update_coordinator update_coordinator --ros-args -p secoc_key:=/etc/ota_secoc.key -p can_iface:=can0'
+ExecStart=/bin/sh -c '. /opt/ros/humble/setup.bash && exec ros2 run update_coordinator update_coordinator --ros-args -p secoc_key:=/etc/ota_secoc.key -p can_iface:=can0 -p timeout_sec:=1200.0'
 Restart=on-failure
 RestartSec=5
 

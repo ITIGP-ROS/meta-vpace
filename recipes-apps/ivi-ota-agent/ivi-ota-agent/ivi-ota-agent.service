@@ -20,6 +20,10 @@ RestartSec=15
 # Runs as root: swupdate writes the rootfs/app and the agent reads a 0600 private
 # key. Narrow what that root can reach.
 User=root
+# /root is an empty read-only tmpfs under ProtectHome=yes, so rclpy cannot
+# create $HOME/.ros/log and every `ros2` invocation dies before the vehicle
+# lock can be registered. HOME must point at a writable, persistent directory.
+Environment=HOME=/var/lib/ivi-ota
 StateDirectory=ivi-ota
 StateDirectoryMode=0700
 ConfigurationDirectory=ivi-ota

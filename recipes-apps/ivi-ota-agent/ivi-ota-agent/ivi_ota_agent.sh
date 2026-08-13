@@ -124,13 +124,18 @@ unlock_system() {
 # explicit key path, put it here: SWUPDATE_ARGS="-v -k /etc/swupdate/public.pem"
 : "${SWUPDATE_ARGS:=-v}"
 : "${REBOOT_AFTER_UPDATE:=0}"
+# How long a single status publish may block before we abandon it. See report().
+# Adafruit IO normally round-trips in under two seconds, so this is not a latency
+# budget -- it is a bound on a broker that intermittently accepts the TCP
+# connection and then stalls, which libmosquitto would otherwise sit on for ~60 s.
+: "${REPORT_TIMEOUT_S:=15}"
 
 # ---- driver approval on the head unit ---------------------------------------
 # The IVI app shows a prompt and writes back a verdict. See
 # IVI/OTA_APPROVAL_PROTOCOL.md for the file layout and the reasoning.
 : "${REQUIRE_APPROVAL:=1}"
 : "${APPROVAL_DIR:=/run/ota-approval}"
-# How long to wait for a human. Longer than the app's own 4 s auto-accept, so a
+# How long to wait for a human. Longer than the app's own 5 s auto-accept, so a
 # running head unit always answers well inside this; the timeout only matters if
 # the app dies mid-prompt.
 : "${APPROVAL_TIMEOUT_S:=120}"
@@ -174,13 +179,67 @@ VERSION_FILE="${VERSION_FILE:-$WORKDIR/installed_version}"
 mkdir -p "$WORKDIR"
 chmod 700 "$WORKDIR"
 
+# Sleep in one-second slices so that when report() kills this watchdog, the most
+# it can orphan is a single `sleep 1` rather than the whole remaining window.
+_report_watchdog() {   # <pid-to-kill> <seconds>
+    _n=0
+    while [ "$_n" -lt "$2" ]; do
+        sleep 1
+        _n=$(( _n + 1 ))
+    done
+    kill -9 "$1" 2>/dev/null || :
+}
+
 # Publish a line to the dashboard's status feed. Best-effort: a failed report must
-# never abort an update.
+# never abort an update -- and, just as importantly, must never DELAY one.
+#
+# Every publish is a fresh TCP+TLS connection, and that path to the broker is
+# intermittently broken in a specific way: the connection is accepted and then
+# stalls, while the long-lived mosquitto_sub above and plain https downloads keep
+# working. libmosquitto's own connect timeout is ~60 s, so an unbounded publish
+# parks the agent for a minute -- and since two of these sit between swupdate
+# returning and unlock_system, a cosmetic dashboard line was holding the VEHICLE
+# for ~2 minutes after the install had already finished.
+#
+# So the call is bounded here. Notes on the shape of it:
+#   - There is no timeout(1) on this image (BusyBox is built without the applet)
+#     and mosquitto_pub has no timeout option, so the bound has to be a watchdog
+#     that SIGKILLs the publish by pid.
+#   - `if wait`, not bare `wait`: `set -e` is on and a killed child exits non-zero.
+#   - Do NOT be tempted to replace the watchdog with a `kill -0` poll here. A
+#     finished child stays a zombie until the shell reaps it, and `kill -0`
+#     succeeds on a zombie, so such a loop would spin for the full window on a
+#     publish that had already SUCCEEDED.
+#
+# Worst case this still adds REPORT_TIMEOUT_S to each of the two post-install
+# reports before the vehicle is released. Making those asynchronous would take it
+# to zero, but the reboot path publishes and then immediately reboots, so a
+# backgrounded report there is a report that never lands.
 report() {
     mosquitto_pub -h "$AIO_HOST" -p "$AIO_PORT" --capath /etc/ssl/certs \
                   -u "$AIO_USER" -P "$AIO_KEY" \
-                  -t "$STATUS_TOPIC" -m "$1" >/dev/null 2>&1 \
-        || warn "could not publish status: $1"
+                  -t "$STATUS_TOPIC" -m "$1" >/dev/null 2>&1 &
+    _pub=$!
+
+    _report_watchdog "$_pub" "$REPORT_TIMEOUT_S" &
+    _killer=$!
+
+    # _pub_rc, not _rc: sh has no locals and _ros2_call already owns _rc. Nothing
+    # calls one from inside the other today, so this is not a live bug -- it is a
+    # name kept distinct so it never becomes one.
+    if wait "$_pub" 2>/dev/null; then _pub_rc=0; else _pub_rc=$?; fi
+
+    kill "$_killer" 2>/dev/null || :
+    wait "$_killer" 2>/dev/null || :
+
+    # 137 is 128+SIGKILL, i.e. the watchdog fired. Worth distinguishing in the
+    # journal: a timeout means the broker stalled, anything else means it
+    # answered and refused us (bad key, bad topic) -- different problems.
+    case "$_pub_rc" in
+        0)   ;;
+        137) warn "status publish timed out after ${REPORT_TIMEOUT_S}s — broker stalled: $1" ;;
+        *)   warn "could not publish status (mosquitto_pub exit $_pub_rc): $1" ;;
+    esac
 }
 
 installed_version() {
@@ -543,6 +602,12 @@ log "installed version: $(installed_version)"
 # republish the last value on the feed topic, which is how a freshly-booted board
 # learns the current campaign. Safe unconditionally because handle() is
 # idempotent against the installed version.
+#
+# Bounded like report(), for the same reason and with the same watchdog. This one
+# is already backgrounded so it never delayed anything, but an unbounded publish
+# against a stalled broker leaves a mosquitto_pub sitting in the process table
+# for a minute holding the AIO key in its argv, which is exactly the litter that
+# made this whole failure mode hard to read in `ps`.
 ( sleep 5
   # `-m "get"`, NOT `-n`. Adafruit's docs say to publish "anything" to that topic,
   # and `-n` sends a ZERO-LENGTH payload -- i.e. nothing. The publish succeeds and
@@ -550,9 +615,17 @@ log "installed version: $(installed_version)"
   # through a campaign it should install. The content is ignored; it must exist.
   mosquitto_pub -h "$AIO_HOST" -p "$AIO_PORT" --capath /etc/ssl/certs \
                 -u "$AIO_USER" -P "$AIO_KEY" \
-                -t "$TOPIC/get" -m "get" >/dev/null 2>&1 \
-    && echo "[ivi-ota] requested last feed value via $TOPIC/get" \
-    || echo "[ivi-ota] WARNING: /get request failed (will still get new messages)" >&2
+                -t "$TOPIC/get" -m "get" >/dev/null 2>&1 &
+  _get=$!
+  _report_watchdog "$_get" "$REPORT_TIMEOUT_S" &
+  _getdog=$!
+  if wait "$_get" 2>/dev/null; then
+      echo "[ivi-ota] requested last feed value via $TOPIC/get"
+  else
+      echo "[ivi-ota] WARNING: /get request failed or timed out (will still get new messages)" >&2
+  fi
+  kill "$_getdog" 2>/dev/null || :
+  wait "$_getdog" 2>/dev/null || :
 ) &
 
 # NOTE: -P puts the AIO key in this process's argv, visible to `ps`. mosquitto_sub

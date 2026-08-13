@@ -2,8 +2,9 @@ SUMMARY = "ITI Qt6 IVI Application"
 LICENSE = "CLOSED"
 
 SRC_URI = " \
-    git://github.com/ITIGP-ROS/IVI.git;protocol=https;branch=main \
+    git://github.com/ITIGP-ROS/IVI.git;protocol=https;branch=Detections3D \
     file://ivi-app.service \
+    file://ivi-tmpfiles.conf \
 "
 
 SRCREV = "${AUTOREV}"
@@ -11,15 +12,69 @@ PV = "1.0+git${SRCPV}"
 
 S = "${WORKDIR}/git"
 
-inherit qt6-cmake systemd
+UNPACKDIR ?= "${WORKDIR}"
 
+inherit qt6-cmake systemd
+inherit ros_distro_humble
+inherit ros_ament_cmake
+
+# ros_ament_cmake installs to /opt/ros/humble by default — keep the app in
+# /usr so the service file and asset paths stay unchanged (appended -D wins)
+EXTRA_OECMAKE:append = " -DCMAKE_INSTALL_PREFIX=${prefix}"
+
+# --- ROS2 dependencies ---
+ROS_BUILD_DEPENDS = " \
+    rclcpp \
+    geometry-msgs \
+    std-msgs \
+    sensor-msgs \
+    object-detection-msgs \
+"
+
+ROS_BUILDTOOL_DEPENDS = " \
+    ament-cmake-native \
+"
+
+ROS_EXEC_DEPENDS = " \
+    rclcpp \
+    geometry-msgs \
+    std-msgs \
+    sensor-msgs \
+    object-detection-msgs \
+"
+
+# Consuming rclcpp/msgs at configure time pulls the target ament_cmake*
+# packages: their installed CMake configs call find_package(ament_cmake_*)
+# REQUIRED for the full set that the ament_cmake umbrella re-exports.
+# meta-ros only propagates these as -native variants, so the target ones must
+# be staged in the recipe sysroot explicitly (same flattening superflore does).
 DEPENDS += " \
     qtbase \
     qtdeclarative \
     qtdeclarative-native \
     qtmultimedia \
+    qtquick3d \
+    qtquick3d-native \
     pulseaudio \
     vosk \
+    ${ROS_BUILD_DEPENDS} \
+    ${ROS_BUILDTOOL_DEPENDS} \
+    ament-cmake \
+    ament-cmake-core \
+    ament-cmake-export-definitions \
+    ament-cmake-export-dependencies \
+    ament-cmake-export-include-directories \
+    ament-cmake-export-interfaces \
+    ament-cmake-export-libraries \
+    ament-cmake-export-link-flags \
+    ament-cmake-export-targets \
+    ament-cmake-gen-version-h \
+    ament-cmake-include-directories \
+    ament-cmake-libraries \
+    ament-cmake-python \
+    ament-cmake-target-dependencies \
+    ament-cmake-test \
+    ament-cmake-version \
 "
 
 # --- Qt6 IVI ---
@@ -31,7 +86,12 @@ RDEPENDS:${PN} += " \
     qtsvg \
     qtimageformats \
     qtdeclarative-qmlplugins \
+    qtquick3d \
+    qtquick3d-qmlplugins \
 "
+
+# --- ROS2 runtime ---
+RDEPENDS:${PN} += "${ROS_EXEC_DEPENDS}"
 
 # -- fonts ---
 RDEPENDS:${PN} += " \
@@ -68,7 +128,7 @@ RDEPENDS:${PN} += " \
 
 do_install:append() {
     install -d ${D}${systemd_system_unitdir}
-    install -m 0644 ${WORKDIR}/ivi-app.service ${D}${systemd_system_unitdir}/
+    install -m 0644 ${UNPACKDIR}/ivi-app.service ${D}${systemd_system_unitdir}/
 
     # Install Vosk model from git repo assets
     install -d ${D}/usr/assets/models/vosk
@@ -77,11 +137,18 @@ do_install:append() {
 
     # Install an empty dir for persistent data (media)
     install -d -m 0755 ${D}/var/lib/ivi/media
+
+    # Persistent media dir must be writable by the weston user (uid 1000):
+    # set ownership at boot via tmpfiles (chown at install time would leak
+    # host uid/gid into the package and break do_package).
+    install -d ${D}${nonarch_libdir}/tmpfiles.d
+    install -m 0644 ${UNPACKDIR}/ivi-tmpfiles.conf ${D}${nonarch_libdir}/tmpfiles.d/
 }
 FILES:${PN} += " \
     /usr/assets/models/vosk \
     ${systemd_system_unitdir}/ivi-app.service \
     /var/lib/ivi/media \
+    ${nonarch_libdir}/tmpfiles.d/ivi-tmpfiles.conf \
 "
 
 SYSTEMD_AUTO_ENABLE = "enable"

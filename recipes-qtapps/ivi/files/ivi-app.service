@@ -11,9 +11,10 @@ Environment="LANG=C.UTF-8"
 Environment=QT_MEDIA_BACKEND=gstreamer
 Environment="QT_QPA_PLATFORM=wayland"
 Environment="QT_QPA_PLATFORMTHEME=gtk2"
+Environment="HOME=/home/weston"
 Environment="XDG_RUNTIME_DIR=/run/user/1000"
 Environment="WAYLAND_DISPLAY=wayland-1"
-ExecStart=/bin/appIVI
+ExecStart=/bin/sh -c '. /opt/ros/humble/setup.bash && exec /bin/appIVI'
 Restart=on-failure
 RestartSec=5
 

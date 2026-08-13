@@ -52,7 +52,7 @@ bool CanComms::connected() const
     return socket_fd_ >= 0;
 }
 
-void CanComms::send_hardware_reset()
+bool CanComms::send_hardware_reset()
 {
     struct can_frame frame {};
     frame.can_id = V_PACE_DB_RESET_COMMAND_FRAME_ID;
@@ -65,12 +65,16 @@ void CanComms::send_hardware_reset()
     ssize_t nbytes = write(socket_fd_, &frame, sizeof(struct can_frame));
     if (nbytes != sizeof(struct can_frame)) {
         std::cerr << "CAN write failed: " << strerror(errno) << std::endl;
+        return false;
     }
+    return true;
 }
 
-bool CanComms::read_sensor_values(int &l_enc, int &r_enc, double imu[6], bool &is_imu_reset,
-                                  SteeringFeedback &steer_fb)
+CanComms::SensorStatus CanComms::read_sensor_values(int &l_enc, int &r_enc, double imu[6],
+                                                    bool &is_imu_reset,
+                                                    SteeringFeedback &steer_fb)
 {
+    SensorStatus status;
     struct can_frame frame;
     bool got_enc = false, got_imu1 = false, got_imu2 = false;
     uint8_t seq1 = 0, seq2 = 0;
@@ -123,20 +127,41 @@ bool CanComms::read_sensor_values(int &l_enc, int &r_enc, double imu[6], bool &i
         }
     }
 
-    // Only check: both IMU frames must be from the same cycle
-    if (got_imu1 && got_imu2) {
-        if (seq1 != seq2) {
-            return false;  // Mismatched frames, reject
+    // The encoder frame stands on its own. 0x110 is an independent transmission
+    // from 0x150/0x160 per the DBC, so IMU freshness must never invalidate it.
+    status.enc = got_enc;
+
+    // The IMU is valid only when BOTH halves arrived AND they describe the same
+    // sample cycle (0x150 carries `sequence` in byte 6, 0x160 in byte 7 — the DBC
+    // requires them to match). A mismatch invalidates the IMU PAIR ONLY; the
+    // encoder read above is unaffected.
+    if (got_imu1 && got_imu2 && seq1 == seq2) {
+        // Both halves are from the same sample cycle. Now require the sample to be
+        // NEW: a frozen sensor/firmware keeps re-sending the same sequence, which is
+        // still internally self-consistent (seq1 == seq2) but stale. Reject staleness
+        // so the EKF predicts through it rather than fusing a frozen reading as fresh.
+        //
+        // The Tiva emits 0x150+0x160 at 50 Hz with a proven-steady sequence (4,300
+        // pairs, 0 mismatches), so there is no legitimate jitter to tolerate — any
+        // non-advance is a genuine freeze. `sequence` is uint8 and wraps, so
+        // "advanced" is tested as != rather than >, which makes 255 -> 0 a valid
+        // advance rather than a false freeze.
+        if (!seq_initialized_ || seq1 != expected_seq_) {
+            status.imu = true;
+            expected_seq_ = seq1;
+            seq_initialized_ = true;
+        } else {
+            // Sequence unchanged since the last ACCEPTED sample => frozen IMU.
+            // Treat exactly like a missing IMU (status.imu stays false). The encoder
+            // is deliberately unaffected — see the R-E decoupling above.
+            status.imu_stale = true;
         }
-        // Accept data, track sequence for next cycle
-        expected_seq_ = seq1;
-        seq_initialized_ = true;
     }
 
-    return (got_enc && got_imu1 && got_imu2);
+    return status;
 }
 
-void CanComms::set_motor_values(float left_vel, float right_vel)
+bool CanComms::set_motor_values(float left_vel, float right_vel)
 {
     struct can_frame frame {};
     frame.can_id = V_PACE_DB_VELOCITY_COMMAND_FRAME_ID;
@@ -151,10 +176,12 @@ void CanComms::set_motor_values(float left_vel, float right_vel)
     ssize_t nbytes = write(socket_fd_, &frame, sizeof(struct can_frame));
     if (nbytes != sizeof(struct can_frame)) {
         std::cerr << "CAN write failed: " << strerror(errno) << std::endl;
+        return false;
     }
+    return true;
 }
 
-void CanComms::set_steering(float steer_angle)
+bool CanComms::set_steering(float steer_angle)
 {
     struct can_frame frame {};
     frame.can_id = V_PACE_DB_STEERING_COMMAND_FRAME_ID;
@@ -168,5 +195,7 @@ void CanComms::set_steering(float steer_angle)
     ssize_t nbytes = write(socket_fd_, &frame, sizeof(struct can_frame));
     if (nbytes != sizeof(struct can_frame)) {
         std::cerr << "CAN write failed: " << strerror(errno) << std::endl;
+        return false;
     }
+    return true;
 }

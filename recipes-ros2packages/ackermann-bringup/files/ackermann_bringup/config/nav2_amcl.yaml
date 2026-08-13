@@ -145,10 +145,15 @@ controller_server:
       batch_size: 2000
       vx_std: 0.2
       vy_std: 0.0
-      wz_std: 0.4
+      wz_std: 0.15    # 37.5% of wz_max (0.40) — kept unchanged through the 0.96→1.00 widening; still comfortably inside the bound so sampling does not pile up at it (turning-radius bundle, item 92)
       vx_max: 0.4
       vx_min: -0.4
-      wz_max: 0.67
+      # = vx_max/min_radius = 0.4/1.00; radius widened from 0.96 to 1.00 for
+      # on-ground servo-load margin (item 92 / bench finding, item 105).
+      # WHY: MEASURED wheels-up 2026-08-08, at R=0.96 the commanded average steering
+      # sat at EXACTLY the +0.2421 clamp — zero margin. R=1.00 gives delta 0.2317,
+      # a 4.2% margin under the clamp.
+      wz_max: 0.40
       ax_max: 0.4
       ax_min: -0.4
       az_max: 0.8
@@ -163,7 +168,19 @@ controller_server:
       motion_model: "Ackermann"
       visualize: false
       AckermannConstraints:
-        min_turning_r: 0.65
+        # THE fix (item 92): 0.65 was UNDRIVABLE — applyConstraints rewrites
+        # wz = sign(wz)*|vx|/min_turning_r, so MPPI emitted a 0.65 m turn needing
+        # delta 0.3481 rad: 44% past the 0.2421 steering clamp and 15% past even the
+        # mechanical right limit 0.3037. Both clamp layers then saturated to 0.955 m,
+        # so the car ran wide while MPPI mispredicted its own pose.
+        # Matches the planner's minimum_turning_radius exactly — one reference radius
+        # for the whole file (turning-radius consistency, item 92).
+        # WIDENED 0.96 -> 1.00 (2026-08-08) for on-ground servo-load margin: the bench
+        # showed R=0.96 put the commanded average steering at EXACTLY the 0.2421 clamp.
+        # delta @ R=1.00 = atan(0.2359/1.00) = 0.2317 rad, 4.2% inside the clamp.
+        # ⚠️ Still ABOVE the servo's measured ~0.222 rad PWM-saturation onset (item 105);
+        # a radius fully clear of that is ~1.05, deliberately NOT taken here — see item 106.
+        min_turning_r: 1.00
       
       # Critics
       critics: ["ConstraintCritic", "ObstaclesCritic", "GoalCritic", "GoalAngleCritic", "PathAlignCritic", "PathFollowCritic", "PathAngleCritic", "PreferForwardCritic", "VelocityDeadbandCritic"]
@@ -176,8 +193,16 @@ controller_server:
         cost_power: 1
         repulsion_weight: 5.0
         critical_weight: 20.0
+        # These two are NOT a second opinion — they are this critic's MODEL of the
+        # costmap, used by distanceToObstacle() to invert cost back into distance.
+        # They MUST stay byte-identical to BOTH costmaps' inflation_layer (item 94).
         cost_scaling_factor: 3.0
-        inflation_radius: 0.30
+        inflation_radius: 0.45
+        # MUST be true for a non-circular robot: unset, the 1.1.20 default is not
+        # determinable from the installed files, and if it resolves false MPPI
+        # collision-checks this 0.38 x 0.22 m body as its INSCRIBED CIRCLE of radius
+        # 0.06 m (the rear edge) — 5.6x smaller than circumscribed (item 94).
+        consider_footprint: true
         cost_weight: 4.0
         collision_cost: 10000.0
         collision_margin_distance: 0.10
@@ -238,13 +263,28 @@ local_costmap:
       width: 4
       height: 4
       resolution: 0.1
-      #footprint: "[[0.32, 0.10], [0.32, -0.10], [-0.06, -0.10], [-0.06, 0.10]]"
-      robot_radius: 0.16
+      # Real footprint: +0.32 m front / -0.06 m rear, ±0.11 m half-width.
+      # robot_radius 0.16 left the front axle outside the footprint (item 39).
+      # Half-width ±0.10 -> ±0.11 (item 85): the wheels reach 0.104-0.106 m, so ±0.10
+      # sat ~4-5 mm INSIDE the real vehicle. Inscribed radius is unchanged at 0.06 m
+      # (the REAR edge binds, not the sides); circumscribed rises 0.33526 -> 0.33838,
+      # which is the threshold inflation_radius must clear.
+      footprint: "[[0.32, 0.11], [0.32, -0.11], [-0.06, -0.11], [-0.06, 0.11]]"
+      #robot_radius: 0.16
       plugins: ["obstacle_layer", "inflation_layer"]
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
+        # cost_scaling_factor left at 3.0: inflation_radius only TRUNCATES the decay
+        # curve, it does not steepen it, so widening already shrinks the cost cliff at
+        # the boundary from 122.7 to 78.2. Re-shaping the decay is tuning, not this fix.
         cost_scaling_factor: 3.0
-        inflation_radius: 0.30
+        # 0.30 -> 0.45 (item 94). nav2's own runtime check requires inflation >= half
+        # the largest cross-section = the circumscribed radius = 0.33838 m for the
+        # ±0.11 footprint; below it, MPPI forfeits the potential-field shortcut and
+        # does FULL footprint collision checking at ~400k trajectory-point evals/s.
+        # 0.45 clears it with ~0.11 m of buffer for odometry/localisation drift.
+        # MUST equal the global costmap AND MPPI ObstaclesCritic.
+        inflation_radius: 0.45
       obstacle_layer:
         plugin: "nav2_costmap_2d::ObstacleLayer"
         enabled: true
@@ -269,8 +309,14 @@ global_costmap:
       global_frame: map
       robot_base_frame: base_link
       use_sim_time: false
-      #footprint: "[[0.32, 0.10], [0.32, -0.10], [-0.06, -0.10], [-0.06, 0.10]]"
-      robot_radius: 0.16
+      # Real footprint: +0.32 m front / -0.06 m rear, ±0.11 m half-width.
+      # robot_radius 0.16 left the front axle outside the footprint (item 39).
+      # Half-width ±0.10 -> ±0.11 (item 85): the wheels reach 0.104-0.106 m, so ±0.10
+      # sat ~4-5 mm INSIDE the real vehicle. Inscribed radius is unchanged at 0.06 m
+      # (the REAR edge binds, not the sides); circumscribed rises 0.33526 -> 0.33838,
+      # which is the threshold inflation_radius must clear.
+      footprint: "[[0.32, 0.11], [0.32, -0.11], [-0.06, -0.11], [-0.06, 0.11]]"
+      #robot_radius: 0.16
       resolution: 0.1
       track_unknown_space: true
       plugins: ["static_layer", "obstacle_layer", "inflation_layer"]
@@ -294,7 +340,9 @@ global_costmap:
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
         cost_scaling_factor: 3.0
-        inflation_radius: 0.30
+        # 0.30 -> 0.45 (item 94) — see the local_costmap inflation_layer for the full
+        # rationale. MUST equal the local costmap AND MPPI ObstaclesCritic.
+        inflation_radius: 0.45
       always_send_full_costmap: false
 
 map_server:
@@ -326,11 +374,27 @@ planner_server:
       analytic_expansion_max_length: 5.0
       analytic_expansion_max_cost: 20.0
       analytic_expansion_max_cost_override: false
-      minimum_turning_radius: 0.80
+      # Mechanical limit is R = wheelbase(0.2359)/tan(0.2421) = 0.955 m. Was 0.80
+      # (optimistic — tighter than mechanically achievable), then 0.96 (rounded up).
+      # WIDENED 0.96 -> 1.00 (2026-08-08) for on-ground servo-load margin: the bench
+      # measured R=0.96 putting the commanded average steering at EXACTLY the 0.2421
+      # clamp — 0.4% of nominal margin, and none at all in practice (item 105).
+      # Must stay EQUAL to MPPI's AckermannConstraints.min_turning_r (item 92).
+      minimum_turning_radius: 1.00
       reverse_penalty: 2.0 #1.0 = no cost
       change_penalty: 1.0
       non_straight_penalty: 2.0
-      cost_penalty: 5.0
+      # 5.0 -> 4.0, retuned WITH the inflation widening (item 91). Widening 0.30->0.45
+      # does not change the cost at a given distance (inflation_radius only truncates
+      # the decay) but it stops truncating sooner, so ~34% more cells carry non-zero
+      # cost: the 1-D cost mass over the inflated band goes 0.1711 -> 0.2299 (x1.344).
+      # cost_penalty MULTIPLIES that field, so holding 5.0 would over-repel the planner
+      # into longer detours and make it refuse passages it previously accepted.
+      # Neutral (repulsion unchanged) would be 5.0/1.344 = 3.72; 4.0 deliberately keeps
+      # a small NET increase in obstacle aversion, which is wanted here because the
+      # footprint also widened, the car cannot rotate out of a tight spot (min radius
+      # 1.00 m), and localisation drift is real. Per-profile tuning comes in Phase 4.
+      cost_penalty: 4.0
       retrospective_penalty: 0.025
       lookup_table_size: 20.0
       cache_obstacle_heuristic: true
@@ -390,8 +454,12 @@ velocity_smoother:
     smoothing_frequency: 20.0
     scale_velocities: false
     feedback: "OPEN_LOOP"
-    max_velocity: [0.4, 0.0, 0.67]
-    min_velocity: [-0.4, 0.0, -0.67]
+    # 3rd element (wz) = vx_max/min_radius = 0.4/1.00 = 0.40 — the FOURTH copy of this
+    # limit; must match MPPI wz_max or the smoother passes rates MPPI no longer intends
+    # to produce (turning-radius consistency, item 92). Radius widened 0.96 -> 1.00 for
+    # on-ground servo-load margin (item 105). x elements unchanged.
+    max_velocity: [0.4, 0.0, 0.40]
+    min_velocity: [-0.4, 0.0, -0.40]
     max_accel: [0.4, 0.0, 0.8]
     max_decel: [-0.4, 0.0, -0.8]
     odom_topic: "odom"

@@ -40,6 +40,7 @@ INSANE_SKIP:${PN} += "dev-so"
 # for swupdate (bundled by ackermann-update)
 do_deploy() {
     tar czf ${DEPLOY_DIR_IMAGE}/ackermann-hardware-${MACHINE}.tar.gz \
+        --warning=no-file-changed \
         -C ${D} .
 }
 addtask deploy after do_install before do_build

@@ -29,6 +29,18 @@ public:
         bool received = false;
     };
 
+    // Per-source freshness for one read cycle. Reported separately because the
+    // encoder and IMU arrive in INDEPENDENT CAN frames (0x110 vs 0x150/0x160 per
+    // the DBC) — a lost IMU frame says nothing about the validity of the encoder.
+    // Collapsing these into one flag was defect R-E: it froze wheel odometry
+    // whenever an IMU frame went missing, feeding the EKF a confident false zero.
+    struct SensorStatus
+    {
+        bool enc = false;   // 0x110 VelocityFeedback arrived this cycle
+        bool imu = false;   // BOTH 0x150 and 0x160 arrived, sequences matched, AND advanced
+        bool imu_stale = false;  // IMU pair arrived but sequence did NOT advance (frozen sensor)
+    };
+
     CanComms() = default;
     ~CanComms() { disconnect(); }
 
@@ -36,11 +48,14 @@ public:
     void disconnect();
     bool connected() const;
 
-    void send_hardware_reset();
-    bool read_sensor_values(int &l_enc, int &r_enc, double imu[6], bool &is_imu_reset,
-                            SteeringFeedback &steer_fb);
-    void set_motor_values(float left_vel, float right_vel);
-    void set_steering(float steer_angle);
+    // TX functions return true when the full frame reached the socket, false on a
+    // short/failed write. The caller uses this to detect a broken link (bus-off,
+    // unplugged Tiva) — a dropped frame must not look like a delivered command.
+    bool send_hardware_reset();
+    SensorStatus read_sensor_values(int &l_enc, int &r_enc, double imu[6], bool &is_imu_reset,
+                                    SteeringFeedback &steer_fb);
+    bool set_motor_values(float left_vel, float right_vel);
+    bool set_steering(float steer_angle);
 
 private:
     int socket_fd_ = -1;

@@ -275,8 +275,18 @@ hardware_interface::CallbackReturn AckermannHardwareSystem::on_activate(
     return hardware_interface::CallbackReturn::ERROR;
   }
   
-  // Send hardware reset via CAN (0x202)
+  // Zero the Tiva's cumulative encoder tick counters (0x140 ResetCommand).
   can_comms_.send_hardware_reset();
+
+  // Re-baseline the HOST side to match. The Tiva's counters restart at 0, so
+  // without this the first read after a re-activation differences a near-zero
+  // tick count against a stale, possibly large `pos` and emits an enormous false
+  // velocity — ~4,900x the physical maximum after only 100 m driven. Resetting
+  // enc/pos/vel and the elapsed-time accumulator keeps host and Tiva consistent.
+  wheel_l_.enc = 0;  wheel_l_.pos = 0.0;  wheel_l_.vel = 0.0;
+  wheel_r_.enc = 0;  wheel_r_.pos = 0.0;  wheel_r_.vel = 0.0;
+  enc_dt_accum_ = 0.0;
+  enc_read_failures_ = 0;   // fresh start: a prior session's loss must not carry over
 
   // Center steering — Tiva-C handles angle->PWM mapping locally
   can_comms_.set_steering(0.0f);
@@ -302,9 +312,21 @@ hardware_interface::CallbackReturn AckermannHardwareSystem::on_deactivate(
   
   if (can_comms_.connected())
   {
+    // Stop the drive, not just centre the steering. This covers the CLEAN
+    // deactivate: writes stop afterwards, so without an explicit zero the Tiva
+    // would hold the last commanded velocity until its own CMD_TIMEOUT fired.
+    //
+    // NOTE: this does NOT cover the runaway case — a *controller* deactivating
+    // or crashing while this hardware component stays ACTIVE, where
+    // controller_manager keeps calling write() at 30 Hz and re-sends the last
+    // command from hardware-owned storage. The Tiva's CMD_TIMEOUT watches frame
+    // ARRIVAL, not content, so a punctual stream of stale commands never trips
+    // it. That needs a command-freshness/heartbeat mechanism — tracked
+    // separately, deliberately not solved here.
+    can_comms_.set_motor_values(0.0f, 0.0f);
     can_comms_.set_steering(0.0f);
   }
-  
+
   RCLCPP_INFO(rclcpp::get_logger("AckermannHardwareSystem"), "Successfully deactivated!");
 
   return hardware_interface::CallbackReturn::SUCCESS;
@@ -323,7 +345,11 @@ hardware_interface::return_type AckermannHardwareSystem::read(
   bool is_imu_reset = false;
   CanComms::SteeringFeedback steer_fb;
   
-  bool got_sensors = can_comms_.read_sensor_values(l_enc, r_enc, imu_data, is_imu_reset, steer_fb);
+  // Per-source freshness. The encoder (0x110) and the IMU (0x150/0x160) are
+  // independent frames on the wire, so each consumer below is gated on its OWN
+  // source — mirroring how steering has always been gated on steer_fb.received.
+  CanComms::SensorStatus status =
+    can_comms_.read_sensor_values(l_enc, r_enc, imu_data, is_imu_reset, steer_fb);
 
   // Steering position comes from the rack-mounted pot (real Ackermann geometry),
   // regardless of encoder/IMU frame freshness.
@@ -343,18 +369,28 @@ hardware_interface::return_type AckermannHardwareSystem::read(
   prev_pot_fault = steer_fb.pot_fault;
   prev_out_of_range = steer_fb.out_of_range;
   
-  if (got_sensors)
+  // A frozen IMU (pair arrived, sequences matched each other, but the sequence did
+  // not advance) is a real fault, unlike a transient dropped frame — surface it.
+  // Throttled: at 30 Hz an unthrottled warn would be 30 lines/s from the control loop.
+  if (status.imu_stale)
+  {
+    RCLCPP_WARN_THROTTLE(
+      rclcpp::get_logger("AckermannHardwareSystem"), throttle_clock_, 2000,
+      "IMU sequence frozen (seq not advancing) — treating IMU as missing. "
+      "Wheel odometry is unaffected.");
+  }
+
+  // IMU: gated on the IMU pair alone. Missing, sequence-mismatched, or STALE IMU
+  // frames no longer touch the encoder (defect R-E).
+  if (status.imu)
   {
       static bool prev_imu_reset = false;
       if (is_imu_reset && !prev_imu_reset) {
-          RCLCPP_WARN(rclcpp::get_logger("AckermannHardwareSystem"), 
+          RCLCPP_WARN(rclcpp::get_logger("AckermannHardwareSystem"),
                       "Firmware reported IMU crash! Auto-healing, retaining previous IMU calibration...");
       }
       prev_imu_reset = is_imu_reset;
-      
-    wheel_l_.enc = l_enc;
-    wheel_r_.enc = r_enc;
-    
+
     imu_accel_[0] = imu_data[0];
     imu_accel_[1] = imu_data[1];
     imu_accel_[2] = imu_data[2];
@@ -388,22 +424,51 @@ hardware_interface::return_type AckermannHardwareSystem::read(
     }
   }
 
-  double delta_seconds = period.seconds();
+  // Wheel odometry: gated on the ENCODER alone (defect R-E). Accumulate elapsed
+  // time so that if a 0x110 frame is genuinely missed, the next one is divided by
+  // the true interval rather than a single cycle — otherwise an N-cycle gap
+  // produces an (N+1)x velocity spike.
+  enc_dt_accum_ += period.seconds();
 
-  double pos_prev = wheel_l_.pos;
-  wheel_l_.pos = wheel_l_.calc_enc_angle();
-  if (delta_seconds > 0.0001) {
-    wheel_l_.vel = (wheel_l_.pos - pos_prev) / delta_seconds;
-  } else {
-    wheel_l_.vel = 0.0;
+  if (status.enc)
+  {
+    wheel_l_.enc = l_enc;
+    wheel_r_.enc = r_enc;
+
+    const double l_pos_prev = wheel_l_.pos;
+    const double r_pos_prev = wheel_r_.pos;
+
+    wheel_l_.pos = wheel_l_.calc_enc_angle();
+    wheel_r_.pos = wheel_r_.calc_enc_angle();
+
+    if (enc_dt_accum_ > 0.0001) {
+      wheel_l_.vel = (wheel_l_.pos - l_pos_prev) / enc_dt_accum_;
+      wheel_r_.vel = (wheel_r_.pos - r_pos_prev) / enc_dt_accum_;
+    }
+
+    enc_dt_accum_ = 0.0;
+    enc_read_failures_ = 0;
   }
-
-  pos_prev = wheel_r_.pos;
-  wheel_r_.pos = wheel_r_.calc_enc_angle();
-  if (delta_seconds > 0.0001) {
-    wheel_r_.vel = (wheel_r_.pos - pos_prev) / delta_seconds;
-  } else {
-    wheel_r_.vel = 0.0;
+  else
+  {
+    // The encoder frame did not arrive this cycle. HOLD the previous pos and vel
+    // rather than fabricating a zero — a brief hold is closer to the truth than a
+    // confident "stopped", which is exactly what misled the EKF before.
+    //
+    // But a hold is only honest for a BRIEF drop. Sustained loss means there is no
+    // trustworthy forward velocity at all (the encoder is the EKF's only vx
+    // source), and holding a stale vx forever would be the same class of silent
+    // wrong data that R-E was. So escalate, mirroring the write-side bus-off
+    // counter: stop rather than drive blind.
+    if (++enc_read_failures_ >= ENC_READ_FAILURE_LIMIT)
+    {
+      RCLCPP_ERROR(
+        rclcpp::get_logger("AckermannHardwareSystem"),
+        "No encoder (0x110) for %zu consecutive cycles (~%d ms) — no trustworthy "
+        "odometry; returning ERROR.",
+        enc_read_failures_, static_cast<int>(enc_read_failures_ * 1000 / 30));
+      return hardware_interface::return_type::ERROR;
+    }
   }
 
   // Steering position is set from the steering pot feedback above
@@ -421,18 +486,54 @@ hardware_interface::return_type AckermannHardwareSystem::write(
 
   double avg_steer_angle = steering_.get_average_steering_cmd();
 
-  // Safety clamp on the host side; Tiva's hardware clamp is a second line of defense
-  constexpr double MAX_STEERING_ANGLE = 0.373302; // 21.38 degrees, matches URDF limit
-  avg_steer_angle = std::clamp(avg_steer_angle, -MAX_STEERING_ANGLE, MAX_STEERING_ANGLE);
+  // Host-side safety clamp at the REAL asymmetric mechanical travel (last ROS
+  // line of defense; the Tiva enforces the same limits in firmware). +left per
+  // REP-103 / DBC steeringSetpoint. The controller/URDF use a conservative
+  // symmetric 0.2421 so the Nav2 planner never plans an infeasible turn; this
+  // clamp instead permits the full real range and guards bypass command paths.
+  // LEFT +0.2421 rad (13.87 deg), RIGHT -0.3037 rad (17.40 deg) — Tiva
+  // steering_control.c / servo_cfg.h, confirmed by CAD.
+  constexpr double STEER_MAX_LEFT  =  0.2421;
+  constexpr double STEER_MAX_RIGHT = -0.3037;
+  avg_steer_angle = std::clamp(avg_steer_angle, STEER_MAX_RIGHT, STEER_MAX_LEFT);
+
+  // Host-side velocity sanity clamp (last ROS line of defense; guards bypass
+  // command paths — there is no Nav2 limit in front of those). Bound is the
+  // measured physical max: 178 rpm wheel (wheels-up) = 0.61 m/s / 0.0325 m
+  // = 18.77 rad/s per wheel. This is NOT the operational cap (that is Nav2
+  // max_vel_x, set conservatively for load); it only rejects the impossible.
+  constexpr float WHEEL_VEL_MAX = 18.77f;  // rad/s, per wheel (= 0.61 m/s)
+  float left_vel  = std::clamp(static_cast<float>(wheel_l_.cmd), -WHEEL_VEL_MAX, WHEEL_VEL_MAX);
+  float right_vel = std::clamp(static_cast<float>(wheel_r_.cmd), -WHEEL_VEL_MAX, WHEEL_VEL_MAX);
 
   // Send physical steering angle in radians directly.
   // Tiva-C handles angle->PWM mapping locally per DBC.
-  can_comms_.set_steering(static_cast<float>(avg_steer_angle));
-  
-  float left_vel = wheel_l_.cmd;
-  float right_vel = wheel_r_.cmd;
-  
-  can_comms_.set_motor_values(left_vel, right_vel);
+  // Both sends are attempted every cycle even when one fails (no short-circuit),
+  // so a single bad frame never suppresses the other axis.
+  bool ok = can_comms_.set_steering(static_cast<float>(avg_steer_angle));
+  ok &= can_comms_.set_motor_values(left_vel, right_vel);
+
+  // Bus-off / link-down detection. Our TX is ~1.6% of a 500 kbit/s bus, so a
+  // failed write is never congestion — it means the link is broken (bus-off,
+  // unplugged Tiva). Surface it after CAN_WRITE_FAILURE_LIMIT consecutive
+  // cycles instead of letting Nav2 keep driving blind on frozen odometry.
+  if (!ok)
+  {
+    if (++can_write_failures_ >= CAN_WRITE_FAILURE_LIMIT)
+    {
+      RCLCPP_ERROR(
+        rclcpp::get_logger("AckermannHardwareSystem"),
+        "CAN write failed %zu consecutive cycles (~%d ms) — bus-off/link down; "
+        "returning ERROR.",
+        can_write_failures_, static_cast<int>(can_write_failures_ * 1000 / 30));
+      return hardware_interface::return_type::ERROR;
+    }
+  }
+  else
+  {
+    can_write_failures_ = 0;
+  }
+
   return hardware_interface::return_type::OK;
 }
 

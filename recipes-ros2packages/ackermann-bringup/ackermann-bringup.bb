@@ -77,6 +77,7 @@ RDEPENDS:${PN} += "${ROS_EXEC_DEPENDS}"
 # for swupdate (bundled by ackermann-update)
 do_deploy() {
     tar czf ${DEPLOY_DIR_IMAGE}/ackermann-bringup-${MACHINE}.tar.gz \
+        --warning=no-file-changed \
         -C ${D} .
 }
 addtask deploy after do_install before do_build

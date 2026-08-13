@@ -15,6 +15,7 @@
 #ifndef ACKERMANN_HARDWARE__ACKERMANN_SYSTEM_HPP_
 #define ACKERMANN_HARDWARE__ACKERMANN_SYSTEM_HPP_
 
+#include <cstddef>
 #include <memory>
 #include <string>
 #include <vector>
@@ -106,6 +107,30 @@ private:
   double imu_gyro_z_sum_ = 0.0;
   double imu_gyro_z_offset_ = 0.0;
   const int IMU_CALIBRATION_SAMPLES = 200; // ~4 seconds at 50Hz
+
+  // hardware_interface::SystemInterface is not a Node and exposes no get_clock(),
+  // so throttled logging needs its own clock. Steady time: this only paces log
+  // output, and must not be affected by sim-time or wall-clock jumps.
+  rclcpp::Clock throttle_clock_{RCL_STEADY_TIME};
+
+  // Seconds elapsed since the last FRESH encoder frame. Velocity is divided by
+  // this rather than by one controller period, so a missed 0x110 does not turn
+  // into an (N+1)x spike when the next one arrives.
+  double enc_dt_accum_ = 0.0;
+
+  // CAN write-failure tracking (bus-off / link-down detection).
+  // Counts CONSECUTIVE failed write cycles; any successful cycle resets it.
+  size_t can_write_failures_ = 0;
+  static constexpr size_t CAN_WRITE_FAILURE_LIMIT = 5; // ~166 ms at 30 Hz
+
+  // Encoder-loss tracking (read side). Counts CONSECUTIVE cycles with no 0x110;
+  // any encoder frame resets it, as does (re)activation. The limit is 10 rather
+  // than the write side's 5 because a transient encoder drop is more plausible
+  // than a bus-off, while ~333 ms is still far too short for the robot to run
+  // away. The encoder is the EKF's ONLY forward-velocity source, so sustained
+  // loss means there is no trustworthy vx at all.
+  size_t enc_read_failures_ = 0;
+  static constexpr size_t ENC_READ_FAILURE_LIMIT = 10; // ~333 ms at 30 Hz
 
   double dummy_front_wheel_pos_ = 0.0;
   double dummy_front_wheel_vel_ = 0.0;

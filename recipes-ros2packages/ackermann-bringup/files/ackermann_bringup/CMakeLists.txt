@@ -17,6 +17,10 @@ find_package(nav2_msgs REQUIRED)
 
 add_executable(emergency_stop_server src/emergency_stop_server.cpp)
 target_include_directories(emergency_stop_server PRIVATE src)
+# NOTE: rosidl interface packages (std_msgs, std_srvs, action_msgs) do NOT export a
+# plain pkg::pkg CMake target — only pkg::pkg__rosidl_typesupport_cpp and friends.
+# Naming them here failed the build on Humble. ament_target_dependencies() below
+# already links them correctly, so only the genuine rclcpp target is listed.
 target_link_libraries(emergency_stop_server
   rclcpp::rclcpp
 )

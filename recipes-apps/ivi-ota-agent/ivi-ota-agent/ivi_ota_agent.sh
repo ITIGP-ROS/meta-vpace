@@ -65,6 +65,29 @@ _ros2_call() {
     ros2 service call "$@" >/dev/null 2>&1 || warn "ros2 service call $1 failed"
 }
 
+# --- vehicle lock ------------------------------------------------------------
+# Registering this update with update_coordinator is what stops the car: the
+# coordinator puts "jetson" in its active set, which drives /emergency_stop/lock
+# and makes twist_mux drop every cmd_vel until we report done.
+#
+# Silently a no-op when update-coordinator is not installed — `command -v ros2`
+# fails inside _ros2_call and it returns success. That is why a stock image
+# updates without ever stopping: nothing is listening, not because the agent
+# chose not to ask.
+lock_system() {
+    log "registering update with the coordinator — the vehicle will hold"
+    _ros2_call /update_coordinator/self_start std_srvs/srv/Trigger "{}"
+}
+
+# MUST run on every path out of run_update(), successful or not. The coordinator
+# does have a 300 s timeout that force-releases a stuck update, but relying on it
+# means five minutes of an immobilised car after a download that failed in two
+# seconds.
+unlock_system() {
+    _ros2_call /update_coordinator/self_done std_srvs/srv/Trigger "{}"
+    log "update finished — vehicle released"
+}
+
 [ -r "$CONF" ] || {
     echo "[ivi-ota] ERROR: no $CONF — run deploy_ivi_agent.sh from the PC." >&2
     exit 1
@@ -201,7 +224,9 @@ ask_approval() {
     # atomic and the app's inotify fires on the first byte, so it would read a
     # half-written file. It recovers on its next poll, which is exactly why this
     # would go unnoticed.
-    printf '{"id":"%s","target":"ivi","version":"%s","requested_at":%s,"stops_vehicle":false}\n' \
+    # stops_vehicle is true because approving is what triggers the hold — the
+    # agent locks the moment the driver accepts, before it even downloads.
+    printf '{"id":"%s","target":"ivi","version":"%s","requested_at":%s,"stops_vehicle":true}\n' \
         "$_oid" "$_av" "$(date +%s)" > "$_offers/$_oid.json.tmp"
     mv "$_offers/$_oid.json.tmp" "$_offers/$_oid.json"
 
@@ -360,6 +385,21 @@ handle() {
         return 0
     fi
 
+    # Approval is what stops the vehicle. The driver said yes to an update, and
+    # the update starts now — holding the road until the install is the point.
+    #
+    # Everything from here to the install lives in run_update() purely so this
+    # unlock cannot be skipped. There are eight early returns in there (download
+    # failure, key unwrap, decryption, cpio magic, size, sha, swupdate itself);
+    # locking inline and releasing at the bottom would leave the car immobilised
+    # on any one of them until the coordinator's 300 s timeout expired.
+    lock_system
+    run_update
+    unlock_system
+    return 0
+}
+
+run_update() {
     report "R1|status|starting update $_running -> $_ver"
 
     rm -rf "$WORKDIR/dl"; mkdir -p "$WORKDIR/dl"
@@ -465,7 +505,6 @@ handle() {
     # provisioned on this device, then runs the install handlers. THIS is where
     # trust is decided -- everything above only avoided wasting time.
     log "handing off to swupdate: swupdate $SWUPDATE_ARGS -i $_swu"
-    _ros2_call /update_coordinator/self_start std_srvs/srv/Trigger "{}"
     # shellcheck disable=SC2086
     if swupdate $SWUPDATE_ARGS -i "$_swu"; then
         log "update to $_ver applied"
@@ -485,7 +524,6 @@ handle() {
         report "R1|status|FAILED update to $_ver — see journalctl -u ivi-ota-agent"
         rm -rf "$WORKDIR/dl"
     fi
-    _ros2_call /update_coordinator/self_done std_srvs/srv/Trigger "{}"
 }
 
 # --- main --------------------------------------------------------------------

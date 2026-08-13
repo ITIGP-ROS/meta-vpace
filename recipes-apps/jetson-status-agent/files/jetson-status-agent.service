@@ -1,0 +1,28 @@
+[Unit]
+Description=Jetson status agent (CPU/GPU/memory/thermal -> vehicle log feed)
+# Wants, not Requires: the agent is worth having up as early as possible and a
+# publish that fails costs one dropped sample, not a restart. It keeps ticking
+# through an outage rather than refusing to start because the link is not there.
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+# Credentials come from /etc/ivi-ota/agent.conf, installed by ivi-ota-agent. If that
+# file is absent the agent says so and exits 1, and Restart=always retries -- which
+# is the behaviour you want on a board where the OTA package lands later.
+ExecStart=/usr/bin/jetson_status_agent -i 60 -v
+Restart=always
+RestartSec=30
+
+# Root: the GPU-memory figure comes from debugfs, which is root-only. Everything
+# else reads world-readable sysfs, so the agent still works unprivileged -- it just
+# reports 0 % for GPU memory.
+User=root
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=jetson-status-agent
+
+[Install]
+WantedBy=multi-user.target

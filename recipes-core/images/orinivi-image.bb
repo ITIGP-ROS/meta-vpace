@@ -41,9 +41,9 @@ IMAGE_INSTALL:append = " \
     kernel-module-hid-multitouch \
     "
 
-# --- OTA  ---
+# --- OTA & Telemetry ---
 IMAGE_INSTALL:append = " ivi-ota-agent"
-
+IMAGE_INSTALL:append = " jetson-status-agent"
 
 # --- Network configuration ---
 

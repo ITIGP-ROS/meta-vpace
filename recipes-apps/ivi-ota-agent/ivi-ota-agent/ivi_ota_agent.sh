@@ -65,6 +65,29 @@ _ros2_call() {
     ros2 service call "$@" >/dev/null 2>&1 || warn "ros2 service call $1 failed"
 }
 
+# --- vehicle lock ------------------------------------------------------------
+# Registering this update with update_coordinator is what stops the car: the
+# coordinator puts "jetson" in its active set, which drives /emergency_stop/lock
+# and makes twist_mux drop every cmd_vel until we report done.
+#
+# Silently a no-op when update-coordinator is not installed — `command -v ros2`
+# fails inside _ros2_call and it returns success. That is why a stock image
+# updates without ever stopping: nothing is listening, not because the agent
+# chose not to ask.
+lock_system() {
+    log "registering update with the coordinator — the vehicle will hold"
+    _ros2_call /update_coordinator/self_start std_srvs/srv/Trigger "{}"
+}
+
+# MUST run on every path out of run_update(), successful or not. The coordinator
+# does have a 300 s timeout that force-releases a stuck update, but relying on it
+# means five minutes of an immobilised car after a download that failed in two
+# seconds.
+unlock_system() {
+    _ros2_call /update_coordinator/self_done std_srvs/srv/Trigger "{}"
+    log "update finished — vehicle released"
+}
+
 [ -r "$CONF" ] || {
     echo "[ivi-ota] ERROR: no $CONF — run deploy_ivi_agent.sh from the PC." >&2
     exit 1
@@ -94,6 +117,25 @@ _ros2_call() {
 # explicit key path, put it here: SWUPDATE_ARGS="-v -k /etc/swupdate/public.pem"
 : "${SWUPDATE_ARGS:=-v}"
 : "${REBOOT_AFTER_UPDATE:=0}"
+
+# ---- driver approval on the head unit ---------------------------------------
+# The IVI app shows a prompt and writes back a verdict. See
+# IVI/OTA_APPROVAL_PROTOCOL.md for the file layout and the reasoning.
+: "${REQUIRE_APPROVAL:=1}"
+: "${APPROVAL_DIR:=/run/ota-approval}"
+# How long to wait for a human. Longer than the app's own 4 s auto-accept, so a
+# running head unit always answers well inside this; the timeout only matters if
+# the app dies mid-prompt.
+: "${APPROVAL_TIMEOUT_S:=120}"
+# What to do when NO head unit can answer — the app is not running, or its
+# liveness file is stale. `approve` keeps the old fully-automatic behaviour so a
+# broken screen cannot block updates forever; `deny` makes the gate absolute at
+# the cost of that availability. See the note in the protocol doc: with
+# `approve`, anyone able to stop the app gets automatic updates back.
+: "${ON_NO_UI:=approve}"
+# Older than this and the UI is considered gone. The app rewrites its liveness
+# file once a second, so 10 s is ten missed beats.
+: "${UI_ALIVE_MAX_AGE_S:=10}"
 
 for v in AIO_USER AIO_KEY OTA_URL_PREFIX; do
     eval "val=\$$v"
@@ -140,6 +182,94 @@ installed_version() {
     else
         echo "${INITIAL_VERSION:-0.0.0}"
     fi
+}
+
+# --- driver approval ---------------------------------------------------------
+# Is a head unit there to answer? It rewrites APPROVAL_DIR/ui-alive every second.
+ui_is_alive() {
+    _alive="$APPROVAL_DIR/ui-alive"
+    [ -f "$_alive" ] || return 1
+    _mtime=$(stat -c %Y "$_alive" 2>/dev/null) || return 1
+    _age=$(( $(date +%s) - _mtime ))
+    [ "$_age" -lt "$UI_ALIVE_MAX_AGE_S" ]
+}
+
+# ask_approval <version>  ->  0 = go ahead, 1 = refused
+#
+# Writes an offer for the IVI app to show, then waits for a one-word verdict.
+# Called BEFORE the download: a refusal must not cost the driver 50 MB of a
+# tethered connection.
+ask_approval() {
+    _av="$1"
+
+    [ "$REQUIRE_APPROVAL" = "1" ] || return 0
+
+    if ! ui_is_alive; then
+        if [ "$ON_NO_UI" = "deny" ]; then
+            warn "no head unit to approve $_av and ON_NO_UI=deny — refusing"
+            report "R1|status|refused $_av — no head unit to approve it"
+            return 1
+        fi
+        log "no head unit to ask (ON_NO_UI=approve) — proceeding automatically"
+        return 0
+    fi
+
+    _oid="ivi-$(date +%s)"
+    _offers="$APPROVAL_DIR/offers"
+    _verdict="$APPROVAL_DIR/verdicts/$_oid"
+
+    mkdir -p "$_offers" 2>/dev/null
+
+    # Write to a temporary name and rename into place. A plain redirect is not
+    # atomic and the app's inotify fires on the first byte, so it would read a
+    # half-written file. It recovers on its next poll, which is exactly why this
+    # would go unnoticed.
+    # stops_vehicle is true because approving is what triggers the hold — the
+    # agent locks the moment the driver accepts, before it even downloads.
+    printf '{"id":"%s","target":"ivi","version":"%s","requested_at":%s,"stops_vehicle":true}\n' \
+        "$_oid" "$_av" "$(date +%s)" > "$_offers/$_oid.json.tmp"
+    mv "$_offers/$_oid.json.tmp" "$_offers/$_oid.json"
+
+    log "waiting up to ${APPROVAL_TIMEOUT_S}s for the driver to approve $_av"
+
+    _waited=0
+    while [ "$_waited" -lt "$APPROVAL_TIMEOUT_S" ]; do
+        if [ -f "$_verdict" ]; then
+            _answer=$(cat "$_verdict" 2>/dev/null)
+            rm -f "$_verdict" "$_offers/$_oid.json"
+            case "$_answer" in
+                approve) log "driver approved $_av";            return 0 ;;
+                deny)    log "driver denied $_av"
+                         report "R1|status|declined $_av on the head unit"
+                         return 1 ;;
+                *)       warn "unrecognised verdict '$_answer' — treating as a refusal"
+                         return 1 ;;
+            esac
+        fi
+
+        # The head unit may have died while the prompt was up. Stop waiting and
+        # fall back to the ON_NO_UI policy rather than sitting here for the full
+        # timeout on every campaign.
+        if ! ui_is_alive; then
+            rm -f "$_offers/$_oid.json"
+            if [ "$ON_NO_UI" = "deny" ]; then
+                warn "head unit went away mid-prompt and ON_NO_UI=deny — refusing"
+                return 1
+            fi
+            warn "head unit went away mid-prompt — proceeding automatically"
+            return 0
+        fi
+
+        sleep 1
+        _waited=$(( _waited + 1 ))
+    done
+
+    # Withdraw our own offer: the app never answers on the driver's behalf, so
+    # an abandoned offer would sit on screen forever.
+    rm -f "$_offers/$_oid.json"
+    warn "no answer within ${APPROVAL_TIMEOUT_S}s — refusing $_av"
+    report "R1|status|no answer for $_av on the head unit"
+    return 1
 }
 
 # --- semver compare, without `sort -V` ---------------------------------------
@@ -246,6 +376,30 @@ handle() {
     echo "$_now" > "$LAST_TRY_FILE"
 
     log "update offered: $_running -> $_ver"
+
+    # Ask the driver BEFORE spending their bandwidth. Everything above this is
+    # free: tag, version, allowlist, downgrade gate and rate limit have all
+    # passed, so the prompt can state a version we actually believe in, and a
+    # refusal costs nothing.
+    if ! ask_approval "$_ver"; then
+        return 0
+    fi
+
+    # Approval is what stops the vehicle. The driver said yes to an update, and
+    # the update starts now — holding the road until the install is the point.
+    #
+    # Everything from here to the install lives in run_update() purely so this
+    # unlock cannot be skipped. There are eight early returns in there (download
+    # failure, key unwrap, decryption, cpio magic, size, sha, swupdate itself);
+    # locking inline and releasing at the bottom would leave the car immobilised
+    # on any one of them until the coordinator's 300 s timeout expired.
+    lock_system
+    run_update
+    unlock_system
+    return 0
+}
+
+run_update() {
     report "R1|status|starting update $_running -> $_ver"
 
     rm -rf "$WORKDIR/dl"; mkdir -p "$WORKDIR/dl"
@@ -351,7 +505,6 @@ handle() {
     # provisioned on this device, then runs the install handlers. THIS is where
     # trust is decided -- everything above only avoided wasting time.
     log "handing off to swupdate: swupdate $SWUPDATE_ARGS -i $_swu"
-    _ros2_call /update_coordinator/self_start std_srvs/srv/Trigger "{}"
     # shellcheck disable=SC2086
     if swupdate $SWUPDATE_ARGS -i "$_swu"; then
         log "update to $_ver applied"
@@ -371,7 +524,6 @@ handle() {
         report "R1|status|FAILED update to $_ver — see journalctl -u ivi-ota-agent"
         rm -rf "$WORKDIR/dl"
     fi
-    _ros2_call /update_coordinator/self_done std_srvs/srv/Trigger "{}"
 }
 
 # --- main --------------------------------------------------------------------

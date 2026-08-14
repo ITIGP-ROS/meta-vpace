@@ -56,6 +56,12 @@ IMAGE_INSTALL:append = " weston-remote-display "
 # watch. Drop this line for a build that must not accept audio from the network.
 IMAGE_INSTALL:append = " ivi-remote-mic "
 
+# Auto-mounts a USB-connected phone (MTP) at the gvfs-shaped path the IVI app already
+# looks for, so its media browser picks it up with no app changes. Pulls in simple-mtpfs
+# and libmtp. Idle cost is nothing — a udev rule and a template unit that only runs while
+# a phone is attached.
+IMAGE_INSTALL:append = " ivi-mtp-mount "
+
 # Touch support
 IMAGE_INSTALL:append = " libinput libinput-bin"
 IMAGE_INSTALL:append = " \

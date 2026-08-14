@@ -1,0 +1,36 @@
+[Unit]
+Description=MTP mount for %I (IVI media browser)
+Documentation=file:/usr/bin/ivi-mtp-mount
+# The mount lives under /run/user/1000, which the weston session creates. Ordering only:
+# if the session is not up there is nothing to mount into, and failing loudly in the
+# journal is more useful than a dependency-failure cascade.
+After=weston.service
+
+[Service]
+Type=simple
+# Must be the user the IVI app runs as. The mount is then owned by that user and needs no
+# allow_other, and it lands inside weston's own 0700 runtime directory rather than being
+# a root-owned FUSE mount the app cannot traverse.
+User=weston
+Group=weston
+Environment=XDG_RUNTIME_DIR=/run/user/1000
+
+# %I, not %i: the unescaped instance name is what becomes the phone's display name in the
+# UI. Quoted so a name containing a space cannot split into two arguments.
+ExecStart=/usr/bin/ivi-mtp-mount mount "%I"
+# Runs however the unit stops -- clean stop, crash, or unplug. Cleanup is not optional
+# here: leaving the directories behind makes the app report a phantom connected phone.
+ExecStopPost=/usr/bin/ivi-mtp-mount umount "%I"
+
+# Deliberately no Restart. This unit is started by udev when a device appears; if the
+# mount failed because the phone is locked or on charging-only, retrying in a loop just
+# fills the journal. Unplug and replug after unlocking is the fix.
+Restart=no
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=ivi-mtp-mount
+
+# No [Install] section on purpose. This is a template driven entirely by
+# 99-ivi-mtp.rules; it must never start at boot, because with no device attached there
+# is nothing to mount.

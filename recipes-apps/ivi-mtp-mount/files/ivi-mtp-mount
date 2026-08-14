@@ -1,0 +1,178 @@
+#!/bin/sh
+# ivi-mtp-mount — expose a USB-connected phone's storage where the IVI app looks for it.
+#
+#   ivi-mtp-mount mount  <name>
+#   ivi-mtp-mount umount <name>
+#
+# Driven by udev (99-ivi-mtp.rules) through ivi-mtp-mount@.service. Not meant to be run
+# by hand except when debugging.
+#
+# ============================================================================
+# WHY THE PATH LOOKS LIKE THIS
+#
+# The app's MTP support (Backend/USBManager.cpp, UsbManager::scanGvfsMtp) is PURE QDir --
+# no gvfs, no D-Bus. It only asks:
+#
+#     /run/user/<uid>/gvfs/          does this directory exist?
+#       mtp:host=<NAME>/             any child starting "mtp:" or "gphoto2:"
+#         <storage>/                 prefers "Internal storage", else the FIRST directory
+#
+# and builds the display name from <NAME> after the '=', turning '_' into ' '.
+#
+# So any FUSE mount at that shape satisfies it. That is what lets us use simple-mtpfs
+# instead of gvfs -- which matters, because gvfs lives in meta-gnome and that layer is
+# not in this build's bblayers.
+#
+# THE MOUNT POINT IS THE *STORAGE* DIRECTORY, NOT THE mtp:host= DIRECTORY.
+#
+# This is the part that is easy to get wrong. If simple-mtpfs were mounted directly on
+# mtp:host=<NAME>/, the app would list that directory, get the phone's own top-level
+# folders, and treat the alphabetically first one -- "Alarms", "Android" -- as the
+# storage, then scan only inside it. Mounting one level deeper means the mtp:host=
+# directory has exactly one child, so the app's "prefer Internal storage, else first
+# directory" lands on the phone's root every time.
+# ============================================================================
+set -e
+
+STORAGE="Internal storage"
+
+log()  { echo "[ivi-mtp-mount] $*"; }
+warn() { echo "[ivi-mtp-mount] WARNING: $*" >&2; }
+
+usage() {
+    echo "usage: ${0##*/} mount|umount <device-name>" >&2
+    exit 2
+}
+
+ACTION="${1:-}"
+RAW_NAME="${2:-}"
+[ -n "$ACTION" ] && [ -n "$RAW_NAME" ] || usage
+
+# udev's ID_VENDOR/ID_MODEL are already tame, but this runs on whatever systemd hands us
+# as the instance name. Anything outside this set would either break the path or change
+# how the app parses the name, so fold it to '_' -- which is also what the app turns back
+# into a space for display.
+NAME=$(printf '%s' "$RAW_NAME" | sed 's/[^A-Za-z0-9._-]/_/g')
+
+# id -u, not a hardcoded 1000: this must be the runtime dir of whoever is running us, and
+# the unit runs us as weston precisely so the mount is owned by the user the app runs as.
+# A root-owned FUSE mount inside weston's 0700 runtime directory would need allow_other
+# and would still be the wrong owner.
+GVFS="/run/user/$(id -u)/gvfs"
+HOST_DIR="$GVFS/mtp:host=$NAME"
+MOUNT="$HOST_DIR/$STORAGE"
+
+case "$ACTION" in
+mount)
+    # The device is rarely ready the instant udev fires -- the kernel has enumerated it,
+    # but libmtp needs the MTP session to come up, and on a locked phone it never will.
+    # Probe rather than launching straight into the blocking mount, so a phone that is
+    # locked or in charging-only mode fails with a clear message instead of a FUSE error.
+    # Read the listing rather than just testing that SOMETHING was printed. With no
+    # device attached simple-mtpfs prints
+    #
+    #     No raw devices found.
+    #
+    # on STDOUT and exits 0 -- so neither `grep -q .` nor the exit status distinguishes
+    # "ready" from "nothing there". Getting this wrong skips the wait entirely and drops
+    # straight into the mount, which fails with the useless
+    # "LIBMTP PANIC: Trying to dump the error stack of a NULL device!".
+    _n=0
+    _ready=0
+    while [ "$_n" -lt 15 ]; do
+        _list=$(simple-mtpfs -l 2>/dev/null || :)
+        case "$_list" in
+            "" | *"No raw devices"* | *"no raw devices"* ) ;;
+            *) _ready=1; break ;;
+        esac
+        sleep 1
+        _n=$(( _n + 1 ))
+    done
+
+    if [ "$_ready" != "1" ]; then
+        warn "no MTP device responded after ${_n}s — simple-mtpfs sees nothing to mount."
+        warn "udev tagged this device ID_MTP_DEVICE=1, but that only means libmtp"
+        warn "RECOGNISES the model; it does not mean the phone is currently offering MTP."
+        warn "Check the phone: USB mode must be 'File Transfer' (not 'Charging only'),"
+        warn "and the screen must be UNLOCKED. Many phones also drop MTP when they lock."
+        exit 1
+    fi
+
+    # Remember where this phone lives in sysfs, so we can notice it leaving.
+    #
+    # WHY NOT JUST RELY ON THE udev REMOVE RULE: because it does not always arrive
+    # usable. Observed on the bench -- a phone that re-enumerated mid-session (MTP
+    # session start makes many of them do this) produced a clean remove+add pair and the
+    # unit correctly restarted, but the FINAL unplug never stopped the unit at all. The
+    # remove rule matches on ENV{ID_MTP_DEVICE}, which is an IMPORT-derived property
+    # read back from udev's database, and that is not something to stake correctness on.
+    #
+    # The failure is not cosmetic. simple-mtpfs keeps serving a cached listing after the
+    # phone is gone, so the mount stays readable, the directory stays present, and the
+    # app -- whose disconnect check is QDir(mountPath).exists() -- shows a phantom phone
+    # with a full file list until it is restarted.
+    SYSPATH=""
+    for _d in /sys/bus/usb/devices/*/; do
+        [ -f "$_d/idVendor" ] || continue
+        _props=$(udevadm info -q property -p "${_d#/sys}" 2>/dev/null) || continue
+        _v=$(printf '%s\n' "$_props" | sed -n 's/^ID_VENDOR=//p')
+        _m=$(printf '%s\n' "$_props" | sed -n 's/^ID_MODEL=//p')
+        if [ "${_v}_${_m}" = "$RAW_NAME" ]; then
+            SYSPATH="$_d"
+            break
+        fi
+    done
+    [ -n "$SYSPATH" ] && log "watching $SYSPATH for removal" \
+        || warn "could not locate this phone in sysfs — falling back to udev for teardown"
+
+    mkdir -p "$MOUNT"
+    log "mounting phone '$NAME' at $MOUNT"
+
+    # Backgrounded rather than exec'd, so this script stays alive as the unit's main
+    # process and can watch for the phone leaving. When it exits, systemd runs
+    # ExecStopPost, which is what unmounts and removes the directories.
+    simple-mtpfs -f "$MOUNT" &
+    _mtp=$!
+
+    while kill -0 "$_mtp" 2>/dev/null; do
+        if [ -n "$SYSPATH" ] && [ ! -d "$SYSPATH" ]; then
+            log "phone '$NAME' disappeared from sysfs — tearing the mount down"
+            kill "$_mtp" 2>/dev/null || :
+            break
+        fi
+        sleep 2
+    done
+
+    # Reap it. `set -e` is on and a killed child exits non-zero, so this must not be a
+    # bare wait.
+    if wait "$_mtp" 2>/dev/null; then :; else :; fi
+    log "mount process for '$NAME' ended"
+    ;;
+
+umount)
+    # Both helpers, because simple-mtpfs links libfuse2 (fusermount) while the rest of
+    # this image is on libfuse3 (fusermount3). Whichever is wrong simply fails.
+    fusermount  -u "$MOUNT" 2>/dev/null \
+        || fusermount3 -u "$MOUNT" 2>/dev/null \
+        || umount "$MOUNT" 2>/dev/null \
+        || :
+
+    # THE DIRECTORIES MUST GO, not just the mount. The app's disconnect check is
+    # QDir(m_mountPath).exists() -- an empty leftover directory reads as "still
+    # connected", and the UI would sit on a phantom device with an empty file list until
+    # the app restarts.
+    rmdir "$MOUNT"    2>/dev/null || :
+    rmdir "$HOST_DIR" 2>/dev/null || :
+
+    if [ -d "$MOUNT" ]; then
+        warn "$MOUNT is still present — something still has it mounted or busy."
+        warn "The app will keep showing this phone as connected until it goes."
+    else
+        log "unmounted and cleaned up '$NAME'"
+    fi
+    ;;
+
+*)
+    usage
+    ;;
+esac

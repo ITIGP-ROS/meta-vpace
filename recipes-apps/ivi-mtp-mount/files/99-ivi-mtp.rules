@@ -1,0 +1,25 @@
+# Auto-mount MTP phones for the IVI media browser.
+#
+# ID_MTP_DEVICE is not ours -- it is set by libmtp's own 69-libmtp.rules, which runs
+# mtp-probe against the USB interface descriptors. That is why this file is numbered 99:
+# it has to run after libmtp has had its say. It also means phones absent from libmtp's
+# device table still work, because mtp-probe inspects the descriptors rather than
+# matching a vendor/product table.
+#
+# The instance name becomes the directory name the app parses for its display label, so
+# ID_VENDOR_ID_MODEL ("Xiaomi_Mi_9T") shows up in the UI as "Xiaomi Mi 9T".
+
+ACTION=="add", SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_device", ENV{ID_MTP_DEVICE}=="1", \
+    TAG+="systemd", \
+    ENV{SYSTEMD_WANTS}="ivi-mtp-mount@$env{ID_VENDOR}_$env{ID_MODEL}.service"
+
+# Stopping on unplug is what triggers ExecStopPost, and therefore the directory cleanup
+# the app depends on to notice the phone is gone.
+#
+# systemctl from a udev rule is normally something to avoid, but the systemd-native
+# alternative does not fit: stop-on-unplug needs BindsTo= on the generated .device unit,
+# whose name derives from the devpath and so cannot be written into a packaged unit file.
+# Remove events do not carry the deadlock risk that add events do, and --no-block keeps
+# udev from waiting on the job.
+ACTION=="remove", SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_device", ENV{ID_MTP_DEVICE}=="1", \
+    RUN+="/usr/bin/systemctl --no-block stop ivi-mtp-mount@$env{ID_VENDOR}_$env{ID_MODEL}.service"

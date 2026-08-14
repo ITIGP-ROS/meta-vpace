@@ -72,3 +72,45 @@ PACKAGECONFIG:append:pn-qtmultimedia = " gstreamer alsa pulseaudio "
 PACKAGECONFIG:append:pn-pulseaudio   = " systemd "
 
 
+# --- Data recording (rosbag2) ---
+# The image installs ros-core only, which does not include rosbag2, so the
+# target currently cannot record sensor data at all -- `ros2 bag` is not even a
+# valid verb on the device.
+#
+# Recording over WiFi is not an option: the LiDAR stream measures 5.21 MB/s
+# (~41.7 Mbit/s) and a single PointCloud2 is ~520 KB, fragmenting into ~370 UDP
+# datagrams -- losing any one drops the whole sample. The image ships
+# kernel-module-mt7601u; MT7601U is a 1x1 2.4 GHz-only chipset.
+#
+# Storage is not a constraint: / is rw with 18.1 GB free (~55 min at 18.75 GB/h).
+#
+# ros2bag is listed explicitly even though the rosbag2 metapackage already
+# RDEPENDS on it: the `ros2 bag record` / `ros2 bag play` CLI verbs come from
+# ros2bag, and naming it turns a mistake into a build error rather than a
+# discovery made on the robot mid-session.
+#
+# rosbag2-storage-mcap is NOT optional here -- it is absent from the rosbag2
+# metapackage's RDEPENDS, so without this line the plugin is simply not built.
+# mcap is preferred over the default sqlite3 storage because it is chunked and
+# append-only, so a bag survives abrupt power loss (the vehicle kill switch).
+# mcap-vendor is deliberately NOT listed: rosbag2-storage-mcap RDEPENDS on it.
+IMAGE_INSTALL:append = " \
+    rosbag2 \
+    ros2bag \
+    rosbag2-transport \
+    rosbag2-storage-mcap \
+    rosbag2-compression-zstd \
+"
+
+# --- Teleop (on-target, off the WiFi link) ---
+# Measured on this vehicle: with the publisher steady at 20 Hz and the link
+# nominally up, 18.8 % of control cycles commanded zero, across 22 dropout
+# episodes in 10.4 s. That is safe -- the controller zeroes in a measured
+# 33.36 ms, and it stays zero -- but it produces stuttering motion, which is
+# unusable for collecting a detection dataset. Running teleop on the target
+# removes the network from the control loop entirely.
+IMAGE_INSTALL:append = " \
+    joy \
+    teleop-twist-joy \
+    teleop-twist-keyboard \
+"

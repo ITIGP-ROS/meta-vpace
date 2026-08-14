@@ -1,0 +1,35 @@
+[Unit]
+Description=IVI remote microphone (Opus/RTP -> PulseAudio virtual mic)
+Documentation=file:/usr/bin/ivi-remote-mic
+# PulseAudio belongs to the weston user's session, and that session is what creates
+# /run/user/1000. Ordering only -- not Requires: if weston is down there is nothing to
+# talk to, but Restart=always below is a cheaper and quieter way to wait than having
+# systemd fail this unit as a dependency casualty.
+After=weston.service
+
+[Service]
+Type=simple
+# Must be the SAME user PulseAudio runs as (uid 1000), or pactl cannot reach it.
+User=weston
+Group=weston
+# pactl and libpulse find the daemon through this. Without it the client library looks
+# in the wrong place and every pactl call fails with "Connection refused".
+Environment=XDG_RUNTIME_DIR=/run/user/1000
+
+ExecStart=/usr/bin/ivi-remote-mic
+# Take the virtual mic away when the service stops, so the box is not left with a dead
+# fake microphone as its default source. The script unloads only its OWN null sink.
+ExecStopPost=/usr/bin/ivi-remote-mic stop
+
+# The script exits non-zero when PulseAudio is not reachable, which on a cold boot is
+# simply "the weston session has not come up yet". Retrying is the whole strategy --
+# the same shape liveliness-respond uses while waiting for can0.
+Restart=always
+RestartSec=10
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=ivi-remote-mic
+
+[Install]
+WantedBy=multi-user.target

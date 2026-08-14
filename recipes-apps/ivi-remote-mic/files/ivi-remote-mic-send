@@ -1,0 +1,56 @@
+#!/bin/sh
+# ivi-remote-mic-send — stream THIS machine's microphone to the IVI head unit.
+#
+#   ivi-remote-mic-send <jetson-address> [port]
+#   ivi-remote-mic-send 10.42.0.50
+#
+# RUNS ON YOUR LAPTOP, not on the Jetson. It is installed under
+# /usr/share/ivi-remote-mic/ on the target only so it travels with the image and is
+# easy to copy off:
+#
+#   scp root@10.42.0.50:/usr/share/ivi-remote-mic/ivi-remote-mic-send .
+#
+# Needs GStreamer with pulsesrc, opusenc and udpsink -- all present in a stock
+# gstreamer1.0-plugins-{base,good} install on a normal desktop.
+#
+# Pairs with ivi-remote-mic on the Jetson, which decodes into a PulseAudio null sink
+# whose monitor is the app's default capture source.
+set -e
+
+HOST="$1"
+PORT="${2:-5004}"
+
+if [ -z "$HOST" ] || [ "$HOST" = "-h" ] || [ "$HOST" = "--help" ]; then
+    echo "usage: ${0##*/} <jetson-address> [port]" >&2
+    echo "  e.g. ${0##*/} 10.42.0.50" >&2
+    exit 2
+fi
+
+command -v gst-launch-1.0 >/dev/null 2>&1 || {
+    echo "error: gst-launch-1.0 not found — install gstreamer1.0-tools" >&2
+    exit 1
+}
+gst-inspect-1.0 opusenc >/dev/null 2>&1 || {
+    echo "error: opusenc not found — install gstreamer1.0-plugins-base" >&2
+    exit 1
+}
+
+echo "streaming the default microphone to ${HOST}:${PORT} — ctrl-c to stop"
+
+# pulsesrc with no device= takes this machine's default source, so whatever you have
+# selected as your input in the desktop's sound settings is what gets sent.
+#
+# 48 kHz into the encoder: Opus works internally at 48 kHz and RTP always declares a
+# 48 kHz clock (RFC 7587). The Jetson end resamples to the 16 kHz Vosk wants; doing it
+# there rather than here keeps this pipeline the same whatever the far end expects.
+#
+# bitrate=24000 is plenty for speech and stays comfortable on marginal WiFi.
+# frame-size=20 keeps latency low; inband-fec=true carries a low-bitrate copy of the
+# previous frame so a single lost packet can be reconstructed rather than concealed.
+exec gst-launch-1.0 -q \
+    pulsesrc ! \
+    audioconvert ! audioresample ! \
+    audio/x-raw,rate=48000,channels=1 ! \
+    opusenc bitrate=24000 frame-size=20 inband-fec=true ! \
+    rtpopuspay ! \
+    udpsink host="$HOST" port="$PORT"

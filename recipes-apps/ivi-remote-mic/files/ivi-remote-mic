@@ -1,0 +1,189 @@
+#!/bin/sh
+# ivi-remote-mic — give the IVI app a microphone it does not physically have.
+#
+#   ivi-remote-mic          receive the RTP stream and feed it to the app (default)
+#   ivi-remote-mic stop     tear the virtual mic back down
+#
+# ============================================================================
+# WHY THIS EXISTS
+#
+# This board has NO audio capture path at all. Not "no mic plugged in" -- no capture
+# hardware:
+#
+#     /proc/asound/pcm   lists no capture device
+#     /dev/snd           holds only playback PCMs (pcmC0D3p, D7p, D8p, D9p -- HDMI out)
+#     /lib/modules       has no snd-usb-audio, so even a USB mic would not work
+#
+# So the source has to be manufactured. PulseAudio's null sink does it: whatever is
+# played into a sink appears on that sink's .monitor, and a monitor is a capture
+# source. Point the app at it and anything we play becomes what the app "hears".
+#
+# The app's capture path is Qt Multimedia -> GStreamer -> PulseAudio (appIVI has
+# libQt6Multimedia, libgstpulseaudio and libpulse loaded alongside libvosk), and Qt's
+# default audio input maps to pulsesrc with no device= -- i.e. the DEFAULT SOURCE.
+# That is why this sets the default source rather than just creating the sink.
+#
+# WHY GSTREAMER AND NOT PULSEAUDIO'S OWN NETWORK MODULES
+#
+# This image's PulseAudio is trimmed to 27 modules. module-null-sink is there, but
+# native-protocol-tcp, rtp-send/recv, tunnel-*, pipe-source, loopback and remap-source
+# are all absent, so there is no PulseAudio-native way to get audio in over the
+# network. GStreamer has everything needed and was already on the image.
+#
+# WHY RTP/UDP AND NOT AN SSH PIPE
+#
+# Over WiFi, TCP is the wrong shape for live audio: a lost packet blocks everything
+# behind it, and a `parec | ssh | paplay` pipeline cannot discard stale audio, so every
+# hiccup pushes the mic PERMANENTLY further behind. RTP over UDP with a jitter buffer
+# drops late packets and stays current -- a loss costs one ~20 ms glitch instead of
+# unbounded drift. Opus rather than raw L16 for the same reason: ~24 kbps instead of
+# 256, and packet-loss concealment that reconstructs across a dropped frame.
+# ============================================================================
+set -e
+
+SINK="ivi_mic"
+# The source the APP actually records from. Not the sink's monitor -- see the long note
+# in our_remap() below.
+SOURCE="ivi_mic_in"
+PORT="${IVI_MIC_PORT:-5004}"
+# Bind address. 0.0.0.0 accepts audio from anywhere that can route here; narrow it to
+# one interface address if this ever needs to be less exposed than it is.
+ADDR="${IVI_MIC_ADDR:-0.0.0.0}"
+
+log() { echo "[ivi-remote-mic] $*"; }
+
+# Find the module index of OUR null sink specifically. `pactl unload-module
+# module-null-sink` would unload EVERY null sink, and this image always has another
+# one -- auto_null, created by module-always-sink because there is no real hardware.
+# Taking that out would leave the box with no default sink at all.
+our_module() {
+    pactl list short modules 2>/dev/null \
+        | awk '/module-null-sink/ && /sink_name='"$SINK"'/ { print $1; exit }'
+}
+
+# ============================================================================
+# WHY A REMAP SOURCE AND NOT JUST THE SINK'S MONITOR
+#
+# A null sink gives you ivi_mic.monitor, and that IS a working capture source -- parec
+# reads real audio off it. But the IVI app never sees it:
+#
+#     app log:  qml: MIC PRESSED - speechManager: SpeechManager(...)
+#               No audio device detected
+#               QObject::connect(QIODevice, SpeechManager): invalid nullptr parameter
+#
+# PulseAudio and GStreamer both report a monitor with device.class = "monitor", and Qt
+# filters monitor-class devices out of QMediaDevices::audioInputs(). The app's own
+# device check therefore finds an empty list and gives up before it ever tries to open
+# anything. GStreamer is not the problem -- `gst-device-monitor-1.0 Audio/Source` lists
+# the monitor happily; the filtering is above it, in Qt.
+#
+# module-remap-source layers an ordinary source on top of that monitor. It reports
+# device.class = "filter", which is not excluded, so Qt can see and open it.
+#
+# The module is packaged separately (poky's do_split_packages splits all 68 PulseAudio
+# modules into their own packages) and is NOT installed by default -- this recipe
+# RDEPENDS on pulseaudio-module-remap-source to pull it in.
+# ============================================================================
+our_remap() {
+    pactl list short modules 2>/dev/null \
+        | awk '/module-remap-source/ && /source_name='"$SOURCE"'/ { print $1; exit }'
+}
+
+case "${1:-receive}" in
+stop)
+    # Remap first: it reads from the sink's monitor, so tearing the sink out from under
+    # it would be the wrong order.
+    _ridx=$(our_remap || :)
+    if [ -n "$_ridx" ]; then
+        pactl unload-module "$_ridx" 2>/dev/null || :
+        log "removed the remap source (module $_ridx)"
+    fi
+    _idx=$(our_module || :)
+    if [ -n "$_idx" ]; then
+        pactl unload-module "$_idx" 2>/dev/null || :
+        log "removed the virtual mic (module $_idx)"
+        # No need to restore the default source by hand: with the sink gone,
+        # PulseAudio falls back on its own, which lands back on auto_null.monitor.
+    fi
+    exit 0
+    ;;
+receive) ;;
+*)
+    echo "usage: ${0##*/} [receive|stop]" >&2
+    exit 2
+    ;;
+esac
+
+# Fail loudly rather than limping on. The unit is Restart=always, so if PulseAudio is
+# not up yet (this races the weston session on a cold boot) systemd simply tries again.
+pactl info >/dev/null 2>&1 || {
+    echo "[ivi-remote-mic] ERROR: cannot reach PulseAudio." >&2
+    echo "[ivi-remote-mic] XDG_RUNTIME_DIR=${XDG_RUNTIME_DIR:-<unset>} -- this must run" >&2
+    echo "[ivi-remote-mic] as the same user PulseAudio does (weston, uid 1000)." >&2
+    exit 1
+}
+
+# Idempotent: the service can restart without stacking up a second sink each time.
+# Matching on the NAME column, not a substring of the whole line, so a description or
+# module argument mentioning the name cannot produce a false positive.
+if pactl list short sinks 2>/dev/null | awk -v s="$SINK" '$2 == s { found = 1 } END { exit !found }'; then
+    log "sink '$SINK' already present"
+else
+    # device.description has NO SPACES on purpose. PulseAudio 17 on this image rejects
+    # any sink_properties value containing a space -- with single quotes, with double
+    # quotes, however it is escaped -- and fails the whole load with a bare
+    # "Failure: Module initialization failed" that names no argument. Underscores are
+    # the cheap way out; every other argument here (rate, channels, format) is fine.
+    pactl load-module module-null-sink \
+        sink_name="$SINK" \
+        sink_properties=device.description=IVI_Remote_Mic \
+        rate=16000 channels=1 >/dev/null
+    log "created null sink '$SINK' (16 kHz mono)"
+fi
+
+# Layer a real (non-monitor) source over the monitor, so Qt will accept it. Idempotent
+# for the same reason the sink is.
+if pactl list short sources 2>/dev/null | awk -v s="$SOURCE" '$2 == s { found = 1 } END { exit !found }'; then
+    log "source '$SOURCE' already present"
+    _have_source=1
+elif pactl load-module module-remap-source \
+        master="${SINK}.monitor" \
+        source_name="$SOURCE" \
+        source_properties=device.description=IVI_Remote_Mic_Input >/dev/null 2>&1; then
+    log "created remap source '$SOURCE' over ${SINK}.monitor"
+    _have_source=1
+else
+    # Degrade rather than refuse to run: audio still arrives and parec can read the
+    # monitor, so the transport is testable. Only the app cannot see it.
+    _have_source=0
+fi
+
+# 16 kHz mono all the way through because that is what Vosk wants -- no resampling in
+# the app's own path.
+if [ "$_have_source" = "1" ]; then
+    pactl set-default-source "$SOURCE"
+    log "default source is now $SOURCE — listening for Opus/RTP on ${ADDR}:${PORT}"
+else
+    pactl set-default-source "${SINK}.monitor"
+    echo "[ivi-remote-mic] WARNING: module-remap-source unavailable — falling back to" >&2
+    echo "[ivi-remote-mic] ${SINK}.monitor. Audio will arrive and parec can read it, but" >&2
+    echo "[ivi-remote-mic] the IVI app will report 'No audio device detected', because Qt" >&2
+    echo "[ivi-remote-mic] excludes monitor-class devices. Install pulseaudio-module-remap-source." >&2
+fi
+
+# NOTE on clock-rate=48000: Opus over RTP ALWAYS declares a 48 kHz clock regardless of
+# the audio sample rate. That is per RFC 7587 and is not a mismatch with the 16 kHz
+# sink below -- do not "fix" it to 16000, the depayloader will reject the stream.
+#
+# sync=false: this is a live capture feed, not playback. With sync=true gstreamer
+# would try to honour timestamps against the pipeline clock and drift against
+# PulseAudio's, which shows up as audio that slowly falls behind.
+exec gst-launch-1.0 -q \
+    udpsrc address="$ADDR" port="$PORT" \
+        caps="application/x-rtp,media=(string)audio,clock-rate=(int)48000,encoding-name=(string)OPUS" ! \
+    rtpjitterbuffer latency=100 ! \
+    rtpopusdepay ! \
+    opusdec plc=true ! \
+    audioconvert ! audioresample ! \
+    audio/x-raw,rate=16000,channels=1 ! \
+    pulsesink device="$SINK" sync=false

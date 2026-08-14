@@ -1,0 +1,22 @@
+[Unit]
+Description=Generate self-signed TLS credentials for the Weston RDP backend
+Documentation=man:weston.ini(5)
+# Idempotent by condition rather than by a flag file: the certificate is the last
+# thing weston-rdp-gen-cert puts in place, so its presence means a previous run
+# completed. A run killed midway leaves no .crt and is simply redone.
+ConditionPathExists=!/etc/weston-rdp/tls.crt
+# The RDP backend refuses to start without these, so they must exist first.
+Before=weston.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/bin/weston-rdp-gen-cert
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=weston-rdp-tls
+
+# Deliberately NOT WantedBy=multi-user.target. This unit is pulled in by the
+# weston.service drop-in that `weston-remote-display on` writes, so a board that
+# never enables remote display never grows a private key on disk.

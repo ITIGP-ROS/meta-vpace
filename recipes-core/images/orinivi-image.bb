@@ -35,6 +35,27 @@ IMAGE_INSTALL:append = " \
 # --- IVI ---
 IMAGE_INSTALL:append = " ivi "
 
+# Mirrors the head unit over RDP on :3389, ON BY DEFAULT, so the board can be driven
+# with no panel attached. The compositor stays on the DRM backend, so the app still
+# renders Quick3D on the GPU. Idle cost is ~35% of one core with nobody connected and
+# no frame-rate loss; a connected viewer costs ~2 cores and takes 60 fps to 52.
+# Disable per board with `weston-remote-display off`.
+#
+# NOTE: the RDP backend does NO authentication. Anyone who can reach port 3389 gets
+# full control of the head unit. Drop this line for a build that must not expose it.
+IMAGE_INSTALL:append = " weston-remote-display "
+
+# Virtual microphone, ON BY DEFAULT. This board has no audio capture hardware at all, so
+# the IVI app's Vosk recognition has nothing to listen to; this decodes an Opus/RTP
+# stream from a developer's laptop into a PulseAudio null sink whose monitor is the
+# default capture source. Sender script ships at
+# /usr/share/ivi-remote-mic/ivi-remote-mic-send — copy it to the laptop.
+#
+# NOTE: this listens on UDP 5004 with no authentication, and what arrives is fed to the
+# VOICE COMMAND path — a step beyond the RDP exposure above, which only lets someone
+# watch. Drop this line for a build that must not accept audio from the network.
+IMAGE_INSTALL:append = " ivi-remote-mic "
+
 # Touch support
 IMAGE_INSTALL:append = " libinput libinput-bin"
 IMAGE_INSTALL:append = " \
@@ -72,3 +93,14 @@ PACKAGECONFIG:append:pn-qtmultimedia = " gstreamer alsa pulseaudio "
 PACKAGECONFIG:append:pn-pulseaudio   = " systemd "
 
 
+## ---- ROS2 -TESTING ONLY ---
+IMAGE_INSTALL:append = " \
+    rosbag2 \
+    ros2bag \
+    rosbag2-transport \
+    rosbag2-storage-mcap \
+    rosbag2-compression-zstd \
+    joy \
+    teleop-twist-joy \
+    teleop-twist-keyboard \
+"

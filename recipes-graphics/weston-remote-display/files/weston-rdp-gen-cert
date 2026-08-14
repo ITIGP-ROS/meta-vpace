@@ -1,0 +1,65 @@
+#!/bin/sh
+# weston-rdp-gen-cert — mint this board's self-signed TLS credentials for Weston's
+# RDP backend.
+#
+# Generated on the device, once, on first enable. Nothing secret is baked into the
+# image: the same discipline the OTA stack follows, where secret/ is gitignored and
+# swupdate-key ships only the public half.
+#
+# The certificate is self-signed, so clients will warn on connect (xfreerdp needs
+# /cert:ignore). That is acceptable for a bench link and is another reason remote
+# display is a toggle rather than the shipped default.
+set -e
+
+DIR="/etc/weston-rdp"
+KEY="$DIR/tls.key"
+CRT="$DIR/tls.crt"
+DAYS=3650
+SUBJ="/CN=vpace-ivi"
+
+log() { echo "[weston-rdp-tls] $*"; }
+
+# Weston runs as User=weston (poky's weston.service), so it has to be able to read
+# the key. Group-readable by weston, not world-readable.
+#
+# Ownership is set here at runtime rather than at do_install time on purpose: a chown
+# during packaging leaks the build host's uid/gid into the package, which is exactly
+# the trap ivi.bb documents for /var/lib/ivi/media.
+#
+# mkdir/chown/chmod rather than `install -d -o root -g weston`: this is a BusyBox
+# image, and the applet set is not guaranteed to have been built with install(1)'s
+# ownership flags. These three always exist.
+mkdir -p "$DIR"
+chown root:weston "$DIR"
+chmod 0750 "$DIR"
+
+if [ -f "$CRT" ] && [ -f "$KEY" ]; then
+    log "credentials already present at $CRT — nothing to do"
+    exit 0
+fi
+
+log "generating a self-signed RDP certificate for this board (valid ${DAYS} days)"
+
+# Build under temporary names and move into place with the CERTIFICATE LAST. The
+# unit's ConditionPathExists=!$CRT treats the certificate as the completion marker,
+# so it must not appear until the key beside it is finished and has its final mode.
+# Get this backwards and a run killed between the two leaves a cert with no readable
+# key, which the condition would then refuse to repair.
+umask 077
+openssl req -x509 -newkey rsa:2048 -nodes \
+        -keyout "$KEY.tmp" -out "$CRT.tmp" \
+        -days "$DAYS" -subj "$SUBJ" >/dev/null 2>&1 || {
+    rm -f "$KEY.tmp" "$CRT.tmp"
+    echo "[weston-rdp-tls] ERROR: openssl failed to generate the keypair" >&2
+    exit 1
+}
+
+chown root:weston "$KEY.tmp"
+chmod 0640 "$KEY.tmp"
+mv "$KEY.tmp" "$KEY"
+
+chown root:weston "$CRT.tmp"
+chmod 0644 "$CRT.tmp"
+mv "$CRT.tmp" "$CRT"
+
+log "wrote $CRT and $KEY"

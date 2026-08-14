@@ -1,0 +1,259 @@
+#!/bin/sh
+# weston-remote-display — switch the head unit between the physical panel and RDP.
+#
+#   weston-remote-display on      mirror the UI over RDP on :3389
+#   weston-remote-display off     back to the plain HDMI config (the production default)
+#   weston-remote-display status  report which one is in effect, and why
+#
+# The head unit keeps running on the DRM backend either way, so the app renders on
+# the Jetson GPU exactly as it does on the panel -- `on` adds a mirror, it does not
+# replace the display path. If a real panel IS attached it keeps working while the
+# mirror runs. See weston-rdp.ini for why it has to be a mirror and not the RDP
+# backend directly.
+#
+# REMOTE DISPLAY IS ON BY DEFAULT. The package ships a vendor drop-in at
+# /usr/lib/systemd/system/weston.service.d/10-remote-display.conf that re-points
+# weston at weston-rdp.ini with --config.
+#
+# HOW THE SWITCH WORKS
+#
+# `off` does not delete the vendor file -- runtime code never edits package files.
+# It writes a file with the SAME NAME into /etc/systemd/system/weston.service.d/, and
+# systemd resolves same-named drop-ins by directory priority (/etc > /run > /usr/lib),
+# so the /etc copy replaces the vendor one entirely, taking its Wants= with it and
+# restoring the stock ExecStart. `on` deletes that override.
+#
+# DO NOT "simplify" this to Environment=WESTON_CONFIG_FILE=... — that variable runs
+# the OTHER WAY. The compositor SETS it (compositor/main.c setenv) so that shell
+# plugins and clients — kiosk-shell, desktop-shell, weston-terminal — can find the
+# same config it loaded. main() takes its own config only from -c/--config. Setting
+# it in the environment is silently ignored: weston logs
+# "Using config file '/etc/xdg/weston/weston.ini'" and starts on the DRM backend,
+# which with no panel attached means it finds no output and exits 1.
+#
+# The cost of --config is that ExecStart has to be restated (see WESTON_EXEC below),
+# so it is coupled to poky's weston.service. If that unit ever gains another flag,
+# this drop-in has to be updated to match. `weston-remote-display status` prints the
+# config weston actually loaded, which is how you catch that drift.
+#
+# WHAT IT COSTS: mirroring reads the finished frame back off the GPU and encodes it
+# on the CPU, and while `on` the DRM connector is forced on whether or not a panel is
+# there. This is a bench tool, not something to leave enabled on a vehicle — port
+# 3389 is open on whatever interface is up and the certificate is self-signed.
+#
+# NOTE: a full rootfs A/B update replaces /etc wholesale and therefore clears this
+# toggle. The application-level ivi-update / ackermann-update payloads do not touch
+# /etc, so it survives those. Re-run `on` after a rootfs update.
+set -e
+
+DROPIN_DIR="/etc/systemd/system/weston.service.d"
+# Same basename as the vendor drop-in ON PURPOSE — that is what masks it.
+DROPIN="$DROPIN_DIR/10-remote-display.conf"
+VENDOR_DROPIN="/usr/lib/systemd/system/weston.service.d/10-remote-display.conf"
+RDP_INI="/etc/xdg/weston/weston-rdp.ini"
+CRT="/etc/weston-rdp/tls.crt"
+PORT=3389
+# Must stay identical to ExecStart in poky's weston.service.
+WESTON_EXEC="/usr/bin/weston --modules=systemd-notify.so"
+
+usage() {
+    echo "usage: ${0##*/} on|off|status" >&2
+    exit 2
+}
+
+# Restarting weston is not enough on its own. ivi-app.service has Requires=weston.service,
+# and systemd propagates the STOP half of that but does not start the app again by
+# itself, so a bare `systemctl restart weston` leaves the screen empty. Restart the app
+# explicitly, and tolerate it being absent so this script still works on an image built
+# without the IVI package.
+restart_stack() {
+    systemctl daemon-reload
+    echo "restarting weston..."
+    systemctl restart weston
+    if systemctl list-unit-files ivi-app.service >/dev/null 2>&1; then
+        systemctl restart ivi-app || echo "warning: ivi-app did not come back — check journalctl -u ivi-app" >&2
+    fi
+}
+
+# Which config did the MAIN compositor load? Straight from weston's own startup banner,
+# which is the only thing that catches a drop-in that parsed fine but did not take
+# effect -- systemd reporting success only means weston started, not that it started on
+# the config we meant.
+#
+# MUST be anchored to the service's MainPID. While the mirror is running there are TWO
+# westons logging under the same identifier, and the nested one gets no --config, so it
+# reports the DEFAULT weston.ini:
+#
+#     weston[43940]: Using config file '/etc/xdg/weston/weston-rdp.ini'   <- main
+#     weston[43947]: Using config file '/etc/xdg/weston/weston.ini'       <- the mirror
+#
+# A plain `tail -n 1` picks up the child and reports failure on a working system.
+weston_loaded_config() {
+    _mainpid=$(systemctl show weston -p MainPID --value 2>/dev/null)
+    [ -n "$_mainpid" ] && [ "$_mainpid" != "0" ] || return 1
+
+    # journald ingestion can lag the notify handshake by a beat, so give it a few
+    # tries rather than declaring failure on a race.
+    _try=0
+    while [ "$_try" -lt 5 ]; do
+        _cfg=$(journalctl -b --no-pager _PID="$_mainpid" 2>/dev/null \
+               | sed -n "s/.*Using config file '\(.*\)'.*/\1/p" | tail -n 1)
+        if [ -n "$_cfg" ]; then
+            echo "$_cfg"
+            return 0
+        fi
+        sleep 1
+        _try=$(( _try + 1 ))
+    done
+    return 1
+}
+
+# Is anything listening on $PORT? Deliberately parsed out of /proc rather than shelling
+# out to ss(8) or netstat(8): this image is BusyBox with no package manager, and the
+# OTA agent already had to learn that lesson the hard way with timeout(1) and base64(1).
+# /proc/net/tcp holds local_address as HEX_IP:HEX_PORT, and st 0A is TCP_LISTEN.
+port_is_listening() {
+    _hexport=$(printf '%04X' "$PORT")
+    for _f in /proc/net/tcp /proc/net/tcp6; do
+        [ -r "$_f" ] || continue
+        # Fields: sl local_address rem_address st ...
+        if awk -v p=":$_hexport" '$2 ~ p"$" && $4 == "0A" { found=1 } END { exit !found }' "$_f"; then
+            return 0
+        fi
+    done
+    return 1
+}
+
+case "${1:-}" in
+on)
+    [ -f "$RDP_INI" ] || {
+        echo "error: $RDP_INI is missing — is weston-remote-display installed?" >&2
+        exit 1
+    }
+    [ -f "$VENDOR_DROPIN" ] || {
+        echo "error: $VENDOR_DROPIN is missing — the package is not installed properly." >&2
+        echo "       That file is what enables remote display; nothing to re-enable." >&2
+        exit 1
+    }
+
+    if [ ! -f "$DROPIN" ]; then
+        echo "remote display is already on (it is the default) — nothing to do."
+        exit 0
+    fi
+
+    # Drop the override and the vendor drop-in is back in force.
+    rm -f "$DROPIN"
+    rmdir "$DROPIN_DIR" 2>/dev/null || :
+
+    restart_stack
+
+    # Prove the drop-in actually took.
+    _loaded=$(weston_loaded_config || :)
+    case "$_loaded" in
+        "$RDP_INI") ;;
+        *)  echo >&2
+            echo "error: weston came up on '${_loaded:-unknown}', not $RDP_INI." >&2
+            echo "       The drop-in did not take effect. Check that ExecStart in" >&2
+            echo "       $DROPIN still matches poky's weston.service." >&2
+            exit 1 ;;
+    esac
+
+    # The mirror is a nested weston. If it did not come up there is no listener, and
+    # the main compositor gives no hint of it -- screen-share failures are logged by
+    # the child, not the parent.
+    if ! port_is_listening; then
+        echo >&2
+        echo "warning: weston is up on $RDP_INI but nothing is listening on $PORT." >&2
+        echo "         The nested RDP compositor failed to start. Check:" >&2
+        echo "           journalctl -t weston -b | tail -n 30" >&2
+        echo "         Most likely $CRT / its key are unreadable by the weston user." >&2
+    fi
+
+    echo
+    echo "remote display ENABLED — mirroring the head unit over RDP."
+    if command -v ip >/dev/null 2>&1; then
+        echo "connect with:  xfreerdp /cert:ignore /v:<address>:$PORT"
+        ip -4 -o addr show scope global 2>/dev/null \
+            | awk '{ sub(/\/.*/, "", $4); print "    " $2 "\t" $4 }'
+    else
+        echo "connect on port $PORT with an RDP client (self-signed cert — expect a warning)."
+    fi
+    echo
+    echo "Verify the GPU path actually came up — this is the whole point:"
+    echo "    journalctl -t weston -b | grep -iE 'renderer|EGL|dmabuf'"
+    ;;
+
+off)
+    if [ -f "$DROPIN" ]; then
+        echo "remote display is already off — nothing to do."
+        exit 0
+    fi
+
+    mkdir -p "$DROPIN_DIR"
+    # Same basename as the vendor drop-in, so systemd uses THIS one instead of it
+    # (/etc outranks /usr/lib for a same-named drop-in). Restating the stock
+    # ExecStart is what undoes the --config; omitting any [Unit] section is what
+    # drops the vendor Wants= on the TLS and connector units.
+    cat > "$DROPIN" <<EOF
+# Written by weston-remote-display(1) to turn remote display OFF.
+# It masks $VENDOR_DROPIN
+# by having the same filename in a higher-priority directory.
+# Remove it with \`weston-remote-display on\` rather than by hand, so weston and the
+# IVI app are restarted together.
+[Service]
+ExecStart=
+ExecStart=$WESTON_EXEC
+EOF
+
+    restart_stack
+    echo
+    echo "remote display DISABLED — plain HDMI config, no mirror."
+    echo "note: the DRM connector stays forced on until the next reboot. After a"
+    echo "      reboot with remote display off AND no panel attached, weston will"
+    echo "      fail to start — there is no output for it to use. Run \`on\` or"
+    echo "      attach a panel."
+    ;;
+
+status)
+    if [ ! -f "$VENDOR_DROPIN" ]; then
+        echo "toggle:      BROKEN (vendor drop-in missing — package not installed?)"
+    elif [ -f "$DROPIN" ]; then
+        echo "toggle:      OFF (masked by $DROPIN)"
+    else
+        echo "toggle:      ON  (default; no override in $DROPIN_DIR)"
+    fi
+
+    _loaded=$(weston_loaded_config || :)
+    if [ -n "$_loaded" ]; then
+        echo "config used: $_loaded"
+        # Ground truth vs intent. Only a problem when the toggle reads ON (no override
+        # present) but weston is running something other than the RDP config.
+        if [ ! -f "$DROPIN" ] && [ "$_loaded" != "$RDP_INI" ]; then
+            echo "             ^^ MISMATCH: toggle is on but weston loaded something else"
+        fi
+    else
+        echo "config used: unknown (weston has not logged a startup banner this boot)"
+    fi
+
+    echo "weston:      $(systemctl is-active weston 2>/dev/null || echo unknown)"
+    if systemctl list-unit-files ivi-app.service >/dev/null 2>&1; then
+        echo "ivi-app:     $(systemctl is-active ivi-app 2>/dev/null || echo unknown)"
+    fi
+
+    if [ -f "$CRT" ]; then
+        echo "tls cert:    $CRT"
+    else
+        echo "tls cert:    absent (generated at boot when remote display is on)"
+    fi
+
+    if port_is_listening; then
+        echo "rdp port:    listening on $PORT"
+    else
+        echo "rdp port:    NOT listening ($PORT) — the nested compositor is not up"
+    fi
+    ;;
+
+*)
+    usage
+    ;;
+esac

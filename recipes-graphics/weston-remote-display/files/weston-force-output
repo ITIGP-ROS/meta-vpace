@@ -1,0 +1,141 @@
+#!/bin/sh
+# weston-force-output — give Weston an output to render into with no panel plugged in,
+# at the resolution the IVI app is actually designed for.
+#
+# WHY THIS IS NEEDED
+#
+# The remote-display config mirrors a real DRM output rather than using the RDP
+# backend directly (see the long note in weston-rdp.ini for why). But with nothing
+# plugged into the HDMI port, weston finds no output at all and exits 1:
+#
+#     DRM: head 'DP-1' found, connector 66 is disconnected.
+#
+# and systemd reports only "status=1/FAILURE" with no explanation, because weston's
+# own log goes to the session scope rather than weston.service.
+#
+# Two steps, in this order:
+#
+#   1. Install a synthetic EDID advertising 1024x600 as the preferred mode.
+#   2. Write "on" to the connector's sysfs status, which forces detection to report
+#      connected and triggers a re-probe that picks the EDID up.
+#
+# WHY THE EDID AND NOT AN [output] MODE LINE
+#
+# Forcing the connector without an EDID gives you the kernel's fallback mode list --
+# 1024x768, 800x600, 640x480 -- and weston takes 1024x768. The IVI QML is laid out for
+# 1024x600, so the mirror comes out wrong.
+#
+# Pinning it with `[output] mode=1024x600` in weston.ini DOES NOT WORK: a bare WxH only
+# selects from modes the connector already reports, and 1024x600 is not among the
+# fallbacks. Weston silently keeps 1024x768.
+#
+# A full modeline in [output] would work, but that section would also apply when a REAL
+# panel is attached, forcing our synthetic CVT timing onto hardware that has its own.
+# Overriding the EDID instead is precisely scoped: it only touches a connector we are
+# already forcing, so a genuinely connected panel keeps its own EDID, its own timing and
+# its own preferred mode. It also makes the two cases agree -- panel or no panel, the app
+# gets 1024x600.
+#
+# Verified on the bench: modes go from [1024x768 800x600 800x600 800x600 640x480] to
+# [1024x600], and weston reports "1024x600@59.9, preferred, current, 49.0 MHz".
+set -e
+
+log() { echo "[weston-force-output] $*"; }
+
+# EDID 1.3, 128 bytes, one detailed timing descriptor holding the standard CVT mode:
+#
+#     Modeline  49.00  1024 1072 1168 1312  600 603 613 624  -hsync +vsync
+#
+# Layout: 0-7 header | 8-17 vendor/product/serial/date | 18-19 version 1.3 |
+# 20-24 digital input, size, gamma, features | 25-34 chromaticity |
+# 35-37 established (none) | 38-53 standard (none) | 54-71 DETAILED TIMING (the mode) |
+# 72-125 three string descriptors | 126 extensions=0 | 127 checksum (whole block sums to 0).
+#
+# To retarget a different panel, regenerate rather than hand-editing: the detailed
+# timing block and the checksum both have to change together.
+EDID_HEX=$(printf '%s' '
+    00ffffff ffffff00 5a030100 01000000
+    01240103 800f0978 0aee91a3 544c9926
+    0f505400 00000101 01010101 01010101
+    01010101 01012413 00204158 18203060
+    3a009a5a 0000001c 000000fc 00565041
+    43452d49 56490a20 20200000 00fe0031
+    30323478 3630300a 20202020 000000fe
+    00666f72 6365640a 20202020 2020009c
+' | tr -d '[:space:]')
+
+# Materialise the blob and install it.
+#
+# TWO STEPS, and the second one matters: the kernel's edid_override handler wants the
+# whole EDID delivered in a SINGLE write(), and rejects anything else with EINVAL.
+# BusyBox printf chunks its output, so writing straight to the override fails:
+#
+#     printf ... > edid_override   ->  rc=1, "printf: write error: Invalid argument"
+#     cat blob   > edid_override   ->  rc=0
+#
+# So printf builds the blob in a temp file (BusyBox here has no xxd, but its printf
+# does understand \xNN), and dd then delivers it as one 128-byte write. Errors are
+# deliberately NOT sent to /dev/null -- hiding them is what made this look like a
+# missing debugfs mount rather than a rejected write.
+write_edid() {   # <override-path>
+    _tmp="/tmp/.weston-edid.$$"
+    _esc=$(printf '%s' "$EDID_HEX" | sed 's/../\\x&/g')
+
+    # Safe as a format string: it is nothing but \xNN escapes, no % anywhere.
+    # shellcheck disable=SC2059
+    if ! printf "$_esc" > "$_tmp"; then
+        rm -f "$_tmp"
+        return 1
+    fi
+
+    # bs=128 count=1 makes the single-write requirement explicit rather than relying
+    # on cat's buffer size happening to be larger than the EDID.
+    if dd if="$_tmp" of="$1" bs=128 count=1 2>/dev/null; then
+        rm -f "$_tmp"
+        return 0
+    fi
+    rm -f "$_tmp"
+    return 1
+}
+
+_forced=0
+for _status in /sys/class/drm/card*-*/status; do
+    [ -w "$_status" ] || continue
+    _conn=$(dirname "$_status")
+    _name=$(basename "$_conn")
+    # The connector directory name is card<N>-<CONNECTOR>; debugfs keys off the bare
+    # connector name.
+    _cname=${_name#*-}
+
+    if [ "$(cat "$_status" 2>/dev/null)" = "connected" ]; then
+        log "$_name is really connected — leaving its EDID and mode alone"
+        continue
+    fi
+
+    # Globbed rather than assuming /sys/kernel/debug/dri/0: the debugfs index does not
+    # have to match the card number, and this board also has dri/1 and dri/128.
+    _ovr=""
+    for _cand in /sys/kernel/debug/dri/*/"$_cname"/edid_override; do
+        [ -w "$_cand" ] && { _ovr="$_cand"; break; }
+    done
+
+    if [ -n "$_ovr" ] && write_edid "$_ovr"; then
+        log "$_name: installed synthetic 1024x600 EDID"
+    else
+        # Not fatal. Without the override the kernel's fallback modes still give weston
+        # an output -- just 1024x768, so the mirror will not match the app's layout.
+        log "WARNING: $_name: could not write edid_override (debugfs not mounted?) —"
+        log "         continuing without it; expect 1024x768 instead of 1024x600"
+    fi
+
+    if echo on > "$_status" 2>/dev/null; then
+        log "$_name forced on (modes: $(tr '\n' ' ' < "$_conn/modes" 2>/dev/null))"
+        _forced=$(( _forced + 1 ))
+    else
+        log "WARNING: could not force $_name on"
+    fi
+done
+
+# Not an error: a board with the panel actually plugged in reaches here having forced
+# nothing, which is the correct outcome.
+log "done ($_forced connector(s) forced)"

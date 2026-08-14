@@ -1,0 +1,26 @@
+[Unit]
+Description=Force the DRM connector on so Weston has an output with no panel attached
+Documentation=file:/usr/bin/weston-force-output
+# Must land before weston enumerates connectors, or weston finds no output and exits.
+Before=weston.service
+
+[Service]
+Type=oneshot
+# Deliberately NO RemainAfterExit, unlike weston-rdp-tls.service. This has to re-run
+# on every weston start, not once per boot.
+#
+# With RemainAfterExit=yes the unit stays "active" after its first run, so systemd
+# skips it on the next weston restart -- and if anything reset the connector in
+# between (an `off`/`on` cycle, or a hand-run `echo detect > .../status`) weston comes
+# back up to "connector 66 is disconnected" and exits 1. Letting the unit go inactive
+# means the Wants= in weston's drop-in re-triggers it every time. Forcing an
+# already-forced connector is idempotent and costs nothing.
+ExecStart=/usr/bin/weston-force-output
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=weston-force-output
+
+# Deliberately NOT WantedBy=multi-user.target. Pulled in by the weston.service
+# drop-in that `weston-remote-display on` writes, so a vehicle running on its real
+# panel never has its connector detection meddled with.

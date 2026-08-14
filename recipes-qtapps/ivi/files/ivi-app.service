@@ -18,5 +18,7 @@ ExecStart=/bin/sh -c '. /opt/ros/humble/setup.bash && exec /bin/appIVI'
 Restart=on-failure
 RestartSec=5
 
+TimeoutStopSec=10
+
 [Install]
 WantedBy=graphical.target

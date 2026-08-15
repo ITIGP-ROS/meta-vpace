@@ -8,7 +8,7 @@ inherit ros_ament_cmake
 inherit cuda
 
 SRC_URI = "git://github.com/YouhanaBeshay/ros2_yolos_cpp_trt.git;protocol=https;branch=dev"
-SRCREV = "b16e454654551e104693084821164b9e3bf181ca"
+SRCREV = "209e45af5274813a9da233dafa50f0eea4a49825"
 
 S = "${WORKDIR}/git"
 

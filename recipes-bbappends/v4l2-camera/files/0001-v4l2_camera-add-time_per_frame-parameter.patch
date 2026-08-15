@@ -1,0 +1,258 @@
+From: V-PACE <yocto@vpace>
+Subject: [PATCH] v4l2_camera: add time_per_frame parameter (VIDIOC_S_PARM)
+
+Stock v4l2_camera has no way to set the capture frame rate. It requests a format
+and starts streaming, leaving the device at whatever interval the format defaults
+to -- 30 fps for our Logitech Brio 100. There is no version to upgrade to: 0.6.2
+(humble), 0.7.1 (jazzy), 0.8.0 (rolling) and upstream master all lack the
+parameter, and none of them calls VIDIOC_S_PARM anywhere.
+
+The consequence is worse than a missing feature, because a `time_per_frame` key
+in a params YAML looks like it works. rclcpp keeps unknown keys as parameter
+overrides and discards them without a warning, so our camera_params.yaml asked
+for 2 fps for months while the camera ran at 30 fps, doing 15x the intended
+TensorRT inference and pushing 18.4 MB/s of throwaway YUYV over a USB 2.0 bus
+shared with the WiFi dongle.
+
+Setting the rate from outside the node is not a workaround. VIDIOC_S_FMT resets
+the frame interval to the format default, so an external S_PARM is undone the
+moment the node applies its format. Measured on target: set 1/5, start the node
+with a differing image_size, and G_PARM reads back 1/30 with the topic at 28 Hz.
+It only appears to survive when the requested format happens to equal the current
+one, because requestImageSize() returns early in that case and skips S_FMT --
+an accident that breaks on any fresh boot, replug or resolution change.
+
+The parameter is modelled on the one in tier4's fork
+(https://github.com/tier4/ros2_v4l2_camera), with three deliberate differences:
+
+  - It is declared unconditionally, even on devices that report no
+    V4L2_CAP_TIMEPERFRAME. A declared parameter that logs a warning is far easier
+    to debug than an undeclared one that vanishes silently -- which is the exact
+    failure this patch exists to remove.
+
+  - applyParameters() applies it *after* the pixel format and image size, and
+    handleParameter() re-applies it after any runtime change to either, because
+    of the S_FMT reset described above.
+
+  - V4L2 lets a driver substitute the nearest interval it supports, and S_PARM
+    still returns success when it does. We compare the granted value against the
+    requested one and warn on a mismatch, so a rate the hardware refused cannot
+    be mistaken for one it accepted. Our camera's slowest advertised interval is
+    1/5, so a request for [1, 2] lands here.
+
+Verified against v4l2_camera 0.6.2 on a Jetson Orin (L4T r36.5, ROS 2 humble).
+
+diff --git a/include/v4l2_camera/parameters.hpp b/include/v4l2_camera/parameters.hpp
+index 71b8f7e..3e97360 100644
+--- a/include/v4l2_camera/parameters.hpp
++++ b/include/v4l2_camera/parameters.hpp
+@@ -76,6 +76,10 @@ public:
+ 
+   std::string getPixelFormat() const {return getValue<std::string>("pixel_format");}
+   std::vector<int64_t> getImageSize() const {return getValue<std::vector<int64_t>>("image_size");}
++  std::vector<int64_t> getTimePerFrame() const
++  {
++    return getValue<std::vector<int64_t>>("time_per_frame");
++  }
+ 
+   std::vector<rclcpp::Parameter> getControlParameters() const
+   {
+diff --git a/include/v4l2_camera/v4l2_camera.hpp b/include/v4l2_camera/v4l2_camera.hpp
+index 1d74d58..6c91e52 100644
+--- a/include/v4l2_camera/v4l2_camera.hpp
++++ b/include/v4l2_camera/v4l2_camera.hpp
+@@ -66,6 +66,7 @@ private:
+ 
+   bool requestPixelFormat(std::string const & fourcc);
+   bool requestImageSize(std::vector<int64_t> const & size);
++  bool requestTimePerFrame(std::vector<int64_t> const & timePerFrame);
+ 
+   sensor_msgs::msg::Image::UniquePtr convert(sensor_msgs::msg::Image const & img) const;
+ 
+diff --git a/include/v4l2_camera/v4l2_camera_device.hpp b/include/v4l2_camera/v4l2_camera_device.hpp
+index 5eb61df..560e4c1 100644
+--- a/include/v4l2_camera/v4l2_camera_device.hpp
++++ b/include/v4l2_camera/v4l2_camera_device.hpp
+@@ -67,6 +67,12 @@ public:
+   auto const & getCurrentDataFormat() const {return cur_data_format_;}
+   bool requestDataFormat(PixelFormat const & format);
+ 
++  // Frame interval as a (numerator, denominator) fraction of a second,
++  // e.g. {1, 30} is 30 fps. {0, 0} means the device does not support setting it.
++  using TimePerFrame = std::pair<uint32_t, uint32_t>;
++  TimePerFrame getCurrentTimePerFrame() const;
++  bool requestTimePerFrame(TimePerFrame const & timePerFrame);
++
+   std::string getCameraName();
+ 
+   sensor_msgs::msg::Image::UniquePtr capture();
+diff --git a/src/parameters.cpp b/src/parameters.cpp
+index 895a65f..b03c9fd 100644
+--- a/src/parameters.cpp
++++ b/src/parameters.cpp
+@@ -111,6 +111,22 @@ void Parameters::declareFormatParameters(V4l2CameraDevice const & device)
+   declareParameter<std::vector<int64_t>>(
+     "image_size", {640, 480}, "Image width & height",
+     image_sizes_constraints.str());
++
++  //// time_per_frame
++  // Declared unconditionally, even when the device cannot set it: a declared
++  // parameter that logs a warning is far easier to debug than an undeclared one,
++  // which rclcpp silently discards as an unused parameter override.
++  auto const current_tpf = device.getCurrentTimePerFrame();
++  auto default_tpf = std::vector<int64_t>{
++    static_cast<int64_t>(current_tpf.first == 0 ? 1 : current_tpf.first),
++    static_cast<int64_t>(current_tpf.second == 0 ? 30 : current_tpf.second)};
++
++  declareParameter<std::vector<int64_t>>(
++    "time_per_frame", default_tpf,
++    "Time between two successive frames, as a fraction of a second",
++    "Length 2 array: [numerator, denominator]. [1, 30] is 30 fps, [1, 5] is 5 fps. "
++    "The device may substitute the nearest interval it supports; a warning is logged "
++    "when it does.");
+ }
+ 
+ void Parameters::declareControlParameters(V4l2CameraDevice const & device)
+diff --git a/src/v4l2_camera.cpp b/src/v4l2_camera.cpp
+index 35774d6..b8b18e5 100644
+--- a/src/v4l2_camera.cpp
++++ b/src/v4l2_camera.cpp
+@@ -153,6 +153,12 @@ void V4L2Camera::applyParameters()
+   auto image_size = parameters_.getImageSize();
+   requestImageSize(image_size);
+ 
++  // Time per frame
++  // Must be applied *after* the format requests above: VIDIOC_S_FMT resets the frame
++  // interval back to the format's default, so setting the rate first is silently undone.
++  auto time_per_frame = parameters_.getTimePerFrame();
++  requestTimePerFrame(time_per_frame);
++
+   // Control parameters
+   auto control_parameters = parameters_.getControlParameters();
+   for (auto const & param : control_parameters) {
+@@ -220,11 +226,20 @@ bool V4L2Camera::handleParameter(rclcpp::Parameter const & param)
+   } else if (param.get_name() == "pixel_format") {
+     camera_->stop();
+     auto success = requestPixelFormat(param.as_string());
++    // S_FMT resets the frame interval, so restore the configured rate.
++    requestTimePerFrame(parameters_.getTimePerFrame());
+     camera_->start();
+     return success;
+   } else if (param.get_name() == "image_size") {
+     camera_->stop();
+     auto success = requestImageSize(param.as_integer_array());
++    // S_FMT resets the frame interval, so restore the configured rate.
++    requestTimePerFrame(parameters_.getTimePerFrame());
++    camera_->start();
++    return success;
++  } else if (param.get_name() == "time_per_frame") {
++    camera_->stop();
++    auto success = requestTimePerFrame(param.as_integer_array());
+     camera_->start();
+     return success;
+   } else if (param.get_name() == "camera_info_url") {
+@@ -280,6 +295,20 @@ bool V4L2Camera::requestImageSize(std::vector<int64_t> const & size)
+   return camera_->requestDataFormat(dataFormat);
+ }
+ 
++bool V4L2Camera::requestTimePerFrame(std::vector<int64_t> const & timePerFrame)
++{
++  if (timePerFrame.size() != 2) {
++    RCLCPP_WARN(
++      get_logger(),
++      "Invalid time per frame; expected dimensions: 2, actual: %lu",
++      timePerFrame.size());
++    return false;
++  }
++
++  return camera_->requestTimePerFrame(
++    {static_cast<uint32_t>(timePerFrame[0]), static_cast<uint32_t>(timePerFrame[1])});
++}
++
+ sensor_msgs::msg::Image::UniquePtr V4L2Camera::convert(sensor_msgs::msg::Image const & img) const
+ {
+   auto tracked_object = std::shared_ptr<const void>{};
+diff --git a/src/v4l2_camera_device.cpp b/src/v4l2_camera_device.cpp
+index d3605bb..ef44831 100644
+--- a/src/v4l2_camera_device.cpp
++++ b/src/v4l2_camera_device.cpp
+@@ -311,6 +311,79 @@ bool V4l2CameraDevice::requestDataFormat(const PixelFormat & format)
+   return true;
+ }
+ 
++V4l2CameraDevice::TimePerFrame V4l2CameraDevice::getCurrentTimePerFrame() const
++{
++  auto streamParm = v4l2_streamparm{};
++  streamParm.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
++
++  if (-1 == ioctl(fd_, VIDIOC_G_PARM, &streamParm)) {
++    return {0, 0};
++  }
++  if (!(streamParm.parm.capture.capability & V4L2_CAP_TIMEPERFRAME)) {
++    return {0, 0};
++  }
++  return {streamParm.parm.capture.timeperframe.numerator,
++    streamParm.parm.capture.timeperframe.denominator};
++}
++
++bool V4l2CameraDevice::requestTimePerFrame(TimePerFrame const & timePerFrame)
++{
++  if (timePerFrame.first == 0 || timePerFrame.second == 0) {
++    RCLCPP_WARN(
++      rclcpp::get_logger("v4l2_camera"),
++      "Invalid time per frame: %u/%u; both parts must be non-zero",
++      timePerFrame.first, timePerFrame.second);
++    return false;
++  }
++
++  auto streamParm = v4l2_streamparm{};
++  streamParm.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
++
++  if (-1 == ioctl(fd_, VIDIOC_G_PARM, &streamParm)) {
++    RCLCPP_ERROR(
++      rclcpp::get_logger("v4l2_camera"),
++      "Failed reading stream parameters: %s (%s)", strerror(errno),
++      std::to_string(errno).c_str());
++    return false;
++  }
++
++  if (!(streamParm.parm.capture.capability & V4L2_CAP_TIMEPERFRAME)) {
++    RCLCPP_WARN(
++      rclcpp::get_logger("v4l2_camera"),
++      "Device does not support setting the frame interval; ignoring time_per_frame");
++    return false;
++  }
++
++  RCLCPP_INFO(
++    rclcpp::get_logger("v4l2_camera"),
++    "Requesting time per frame: %u/%u", timePerFrame.first, timePerFrame.second);
++
++  streamParm.parm.capture.timeperframe.numerator = timePerFrame.first;
++  streamParm.parm.capture.timeperframe.denominator = timePerFrame.second;
++
++  if (-1 == ioctl(fd_, VIDIOC_S_PARM, &streamParm)) {
++    RCLCPP_ERROR(
++      rclcpp::get_logger("v4l2_camera"),
++      "Failed requesting time per frame: %s (%s)", strerror(errno),
++      std::to_string(errno).c_str());
++    return false;
++  }
++
++  // The driver is allowed to substitute the nearest interval it supports. Say so
++  // loudly rather than reporting success for a rate that is not what was asked for.
++  auto const & granted = streamParm.parm.capture.timeperframe;
++  if (granted.numerator != timePerFrame.first || granted.denominator != timePerFrame.second) {
++    RCLCPP_WARN(
++      rclcpp::get_logger("v4l2_camera"),
++      "Device substituted time per frame %u/%u for the requested %u/%u",
++      granted.numerator, granted.denominator, timePerFrame.first, timePerFrame.second);
++  } else {
++    RCLCPP_INFO(rclcpp::get_logger("v4l2_camera"), "Success");
++  }
++
++  return true;
++}
++
+ void V4l2CameraDevice::listImageFormats()
+ {
+   image_formats_.clear();

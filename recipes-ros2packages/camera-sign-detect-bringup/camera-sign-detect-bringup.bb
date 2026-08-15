@@ -6,7 +6,7 @@ inherit ros_distro_humble
 inherit ros_ament_cmake
 
 SRC_URI = "git://github.com/ITIGP-ROS/ros2_ws_gp.git;protocol=https;branch=main"
-SRCREV = "070b54c21527248e2f80b304d7770e4b4db654ba"
+SRCREV = "248757936de8237a27d38f4bed64789ec27ef44b"
 
 S = "${WORKDIR}/git/src/camera_sign_detect_bringup"
 

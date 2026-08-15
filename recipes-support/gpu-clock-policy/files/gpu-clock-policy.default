@@ -1,0 +1,32 @@
+# Clock policy for the sign-detection workload.
+#
+# GPU_CLOCK_MODE:
+#   targeted       GPU devfreq floor only (GPU_MIN_FREQ below). Leaves CPU
+#                  frequency, CPU idle states and EMC untouched.
+#   jetson_clocks  NVIDIA's tool: maximises CPU, GPU and EMC, and disables every
+#                  CPU idle state. Requires tegra-tools-jetson-clocks.
+#   off            Change nothing.
+#
+# Chosen: jetson_clocks. Measured on this board, disabling all 12 cpuidle states
+# costs 0.00 W (c7 residency is already ~0%, and the kernel's default ARM64 idle
+# still issues WFI), so the usual objection to it does not apply here. It costs
+# 0.34 W more than "targeted" at idle, from pinning CPU cores to 1984 MHz.
+#
+# Switch to targeted if you later want a GPU floor below maximum -- jetson_clocks
+# can only do max.
+GPU_CLOCK_MODE=jetson_clocks
+
+# GPU devfreq floor in Hz, used by GPU_CLOCK_MODE=targeted. Empty leaves it alone.
+#
+# 1173000000 is this board's hardware maximum, so this pins the GPU at full clock:
+# podgov can no longer park it at 306 MHz between frames and inference never starts
+# from a cold clock.
+#
+# Available steps on this board:
+#   306000000 408000000 510000000 612000000 714000000
+#   816000000 918000000 1020000000 1122000000 1173000000
+#
+# To find the cheapest floor that still meets the CAN-out latency budget, set
+# publish_timing: true on the detector and compare the inference column across a few
+# of these, then lower this to the lowest one that passes.
+GPU_MIN_FREQ=1173000000

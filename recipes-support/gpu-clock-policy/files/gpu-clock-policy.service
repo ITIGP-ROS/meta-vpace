@@ -1,0 +1,19 @@
+[Unit]
+Description=V-PACE clock policy (jetson_clocks / GPU devfreq floor)
+Documentation=file:/usr/bin/gpu-clock-policy.sh
+# nvpmodel applies the power mode's frequency caps. Running before it would have our
+# settings overwritten -- nvpmodel writes GPU max_freq, and a max below our floor
+# drags the floor down with it.
+After=nvpmodel.service multi-user.target
+Wants=nvpmodel.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+# Tune GPU_MIN_FREQ here without rebuilding while measuring; fold the chosen value
+# back into the recipe once settled, because /etc is replaced on OTA update.
+EnvironmentFile=-/etc/default/gpu-clock-policy
+ExecStart=/usr/bin/gpu-clock-policy.sh
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,15 @@
+# Stable name for the front sign-detection camera.
+#
+# /dev/videoN is not stable for this device. On this hardware the Brio has been
+# observed at video0, video1 and video2 across replugs, because the number depends
+# on enumeration order and the camera claims two nodes (capture + metadata).
+# camera_params.yaml previously hardcoded /dev/video0 and broke whenever the camera
+# was moved to a different port.
+#
+# Matching on vendor:product rather than a by-id path keeps this valid across units:
+# the by-id symlink embeds the camera's serial number, so it would only ever resolve
+# on the one Jetson it was captured from.
+#
+# ATTR{index}=="0" picks the capture node; index 1 is the metadata node
+# (V4L2_CAP_META_CAPTURE), which cannot stream video.
+SUBSYSTEM=="video4linux", ATTRS{idVendor}=="046d", ATTRS{idProduct}=="094c", ATTR{index}=="0", SYMLINK+="camera-front"

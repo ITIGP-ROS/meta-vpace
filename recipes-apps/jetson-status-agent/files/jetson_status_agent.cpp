@@ -11,6 +11,24 @@
  * id is the only thing that separates the two summaries. See README.md for the full
  * contract, including every AUX layout.
  *
+ * ONE PERIODIC MESSAGE, NOT TWO. The tick publishes 0x63 SYS SUMMARY, whose AUX is
+ * SIXTEEN hex digits rather than eight:
+ *
+ *     ID:A2 | CODE:63 | SEV:0 | TS:261542 | AUX:001204072B455F00
+ *                                               \______/\______/
+ *                                                 0x58    0x60
+ *
+ * The two halves are the 0x58 and 0x60 words THIS AGENT USED TO SEND, unchanged and
+ * in that order. That is the whole point of the layout: the dashboard splits the
+ * field in half and feeds each half to the decoder it already has, instead of
+ * learning a third bit layout. It also sidesteps JavaScript — its bitwise operators
+ * are 32-bit, so a 16-digit AUX cannot be unpacked with >>> at all, but two 8-digit
+ * substrings can.
+ *
+ * 0x58 and 0x60 are NOT retired. The Cluster guest (ID:A0) still publishes 0x58 with
+ * this same layout, and --split makes this agent send the old pair again, which is
+ * what you want while the dashboard is still on the old build.
+ *
  * NO MQTT LIBRARY. Publishing spawns mosquitto_pub, which is already in the image
  * for ivi-ota-agent, exactly as busmon does on the Cluster. That keeps this a single
  * translation unit with nothing to link and nothing to keep in step with a library's
@@ -19,15 +37,22 @@
  * Credentials are read from /etc/ivi-ota/agent.conf — the file the OTA agent already
  * has. There is deliberately no second copy of the key to install, rotate or leak.
  *
- * RATE LIMIT — the reason the interval has a floor in code. Adafruit IO allows 30
- * data points per minute ACCOUNT-WIDE, shared with the ESP32 (which paces itself at
- * one publish per 3 s) and the Cluster. This agent's steady state is two points a
- * minute. Blow the quota and you throttle the ESP32's logs and the OTA feed with it.
+ * RATE LIMIT — the reason the interval has a floor in code, and the reason 0x63
+ * exists at all. Adafruit IO allows 30 data points per minute ACCOUNT-WIDE, shared
+ * with the ESP32 (which paces itself at one publish per 3 s, i.e. 20 of the 30) and
+ * the Cluster. Folding the two periodic messages into one takes this agent's steady
+ * state from two points a minute to ONE. Blow the quota and you throttle the ESP32's
+ * logs and the OTA feed with it.
+ *
+ * Events (0x61 THERMAL, 0x62 DISK LOW) are deliberately NOT folded in: they are
+ * edge-triggered, so in the steady state they cost nothing, and merging a
+ * transition into a periodic tick would delay it by up to a full interval.
  *
  * Build:  ${CXX} -std=c++17 -o jetson_status_agent jetson_status_agent.cpp
  * Usage:  jetson_status_agent --probe          what can this board read?
  *         jetson_status_agent --dry-run        print lines, publish nothing
  *         jetson_status_agent -i 60            run (the service does this)
+ *         jetson_status_agent --split          legacy 0x58 + 0x60 pair, 2 points/min
  */
 
 #include <algorithm>
@@ -59,7 +84,10 @@ enum Code : uint8_t {
     CODE_GPU_LOAD   = 0x60,
     CODE_THERMAL    = 0x61,
     CODE_DISK_LOW   = 0x62,
-    // 0x63-0x6F are free. Adding one means a name and an AUX decoder on the
+    // 0x63 SYS SUMMARY carries 0x58 and 0x60 in one point, and is what the tick
+    // sends unless --split. The only code with a 16-digit AUX.
+    CODE_SYS_SUMMARY = 0x63,
+    // 0x64-0x6F are free. Adding one means a name and an AUX decoder on the
     // dashboard side too, so say which code before you use it.
 };
 
@@ -323,6 +351,19 @@ static uint32_t pack_disk(double used, uint32_t free_mib)
     return (uint32_t(clamp_pct(used < 0 ? 0 : used)) << 24) | (free_mib & 0xFFFFFF);
 }
 
+// 0x58 in the high word, 0x60 in the low word — the two legacy AUX values side by
+// side, byte for byte. Built by CALLING the existing packers rather than by
+// re-deriving the bit positions: there is then no second copy of the layout that can
+// drift, and --split and the combined path are guaranteed to describe the same
+// sample the same way. Anything that changes 0x58's or 0x60's packing changes this
+// automatically, which is the intent.
+static uint64_t pack_sys_summary(int up_min, double mem, double cpu,
+                                 double gpu, double gpu_mem, double temp)
+{
+    return (uint64_t(pack_sys_health(up_min, mem, cpu)) << 32)
+         |  uint64_t(pack_gpu_load(gpu, gpu_mem, temp));
+}
+
 // ------------------------------------------------------------------ the publisher
 
 struct Config {
@@ -385,12 +426,18 @@ static bool g_dry_run = false;
 // The key goes in argv, so it is visible in `ps` to anything already running as
 // root on this board. That is the same exposure ivi_ota_agent.sh and busmon already
 // accept, and mosquitto_pub offers no file-based password option.
-static void publish(const Config &cfg, uint8_t code, int sev, uint32_t aux)
+// aux_digits is 8 for every code but 0x63, which needs 16. It is a parameter rather
+// than something derived from `code` so the width stays visible at the call site --
+// the width IS the wire contract, and a reader of publish_periodic should not have
+// to come in here to find out how wide the field they are looking at is.
+static void publish(const Config &cfg, uint8_t code, int sev, uint64_t aux,
+                    int aux_digits = 8)
 {
     char payload[128];
     std::snprintf(payload, sizeof(payload),
-                  "ID:%02X | CODE:%02X | SEV:%d | TS:%llu | AUX:%08X",
-                  ECU_ID, code, sev, (unsigned long long)mono_ms(), aux);
+                  "ID:%02X | CODE:%02X | SEV:%d | TS:%llu | AUX:%0*llX",
+                  ECU_ID, code, sev, (unsigned long long)mono_ms(),
+                  aux_digits, (unsigned long long)aux);
 
     std::printf("%s\n", payload);
     std::fflush(stdout);
@@ -454,10 +501,19 @@ struct EventState {
     int disk    = -1;      // -1 unknown, 0 ok, 1 low
 };
 
-static void publish_periodic(const Config &cfg, const Sample &s)
+// One point per tick by default. `split` sends the old two-message pair instead --
+// keep it for as long as the dashboard on the bench does not know 0x63 yet, because
+// a Jetson flashed ahead of the dashboard otherwise renders as a bare "63" with no
+// detail and looks like a broken decoder rather than a version skew.
+static void publish_periodic(const Config &cfg, const Sample &s, bool split)
 {
-    publish(cfg, CODE_SYS_HEALTH, SEV_INFO, pack_sys_health(s.up_min, s.mem, s.cpu));
-    publish(cfg, CODE_GPU_LOAD,   SEV_INFO, pack_gpu_load(s.gpu, s.gpu_mem, s.temp));
+    if (split) {
+        publish(cfg, CODE_SYS_HEALTH, SEV_INFO, pack_sys_health(s.up_min, s.mem, s.cpu));
+        publish(cfg, CODE_GPU_LOAD,   SEV_INFO, pack_gpu_load(s.gpu, s.gpu_mem, s.temp));
+        return;
+    }
+    publish(cfg, CODE_SYS_SUMMARY, SEV_INFO,
+            pack_sys_summary(s.up_min, s.mem, s.cpu, s.gpu, s.gpu_mem, s.temp), 16);
 }
 
 // Only on a transition. A DISK LOW every minute for a week is ten thousand identical
@@ -509,11 +565,17 @@ static void probe()
                 show(s.gpu_mem, " %").c_str());
     std::printf("  soc temp    %s      (hottest CPU/GPU/SOC/TJ thermal zone)\n",
                 show(s.temp, " C").c_str());
-    std::printf("\n--- the lines this would publish ---\n");
-
     Config cfg;
     g_dry_run = true;
-    publish_periodic(cfg, s);
+
+    std::printf("\n--- the line this would publish (one point) ---\n");
+    publish_periodic(cfg, s, false);
+
+    // Printed side by side on purpose: the two legacy words ARE the two halves of
+    // the line above, so this is the check that says so at a glance. If they ever
+    // stop matching, pack_sys_summary and the packers it calls have diverged.
+    std::printf("\n--- --split would send these two instead ---\n");
+    publish_periodic(cfg, s, true);
 }
 
 static void usage(const char *argv0)
@@ -525,6 +587,9 @@ static void usage(const char *argv0)
         "      --temp-warn N     SoC °C for a THERMAL LIMIT warning (default 80)\n"
         "      --temp-crit N     SoC °C for a THERMAL LIMIT error   (default 95)\n"
         "      --disk-warn N     root filesystem %% full for DISK LOW (default 90)\n"
+        "      --split           publish the legacy 0x58 + 0x60 pair instead of the\n"
+        "                        combined 0x63 — two points per tick, for a dashboard\n"
+        "                        that does not know 0x63 yet\n"
         "  -p, --probe           print what this board can read, then exit\n"
         "  -n, --dry-run         print the lines, publish nothing\n"
         "  -1, --once            one tick, then exit\n"
@@ -536,7 +601,7 @@ int main(int argc, char **argv)
 {
     const char *conf_path = DEFAULT_CONF;
     int  interval = 60;
-    bool once = false, do_probe = false, verbose = false;
+    bool once = false, do_probe = false, verbose = false, split = false;
     Thresholds th;
 
     static const option longopts[] = {
@@ -545,6 +610,7 @@ int main(int argc, char **argv)
         {"temp-warn", required_argument, nullptr, 1000},
         {"temp-crit", required_argument, nullptr, 1001},
         {"disk-warn", required_argument, nullptr, 1002},
+        {"split",     no_argument,       nullptr, 1003},
         {"probe",     no_argument,       nullptr, 'p'},
         {"dry-run",   no_argument,       nullptr, 'n'},
         {"once",      no_argument,       nullptr, '1'},
@@ -561,6 +627,7 @@ int main(int argc, char **argv)
         case 1000: th.temp_warn = std::atof(optarg); break;
         case 1001: th.temp_crit = std::atof(optarg); break;
         case 1002: th.disk_warn = std::atof(optarg); break;
+        case 1003: split = true; break;
         case 'p':  do_probe = true; break;
         case 'n':  g_dry_run = true; break;
         case '1':  once = true; break;
@@ -598,7 +665,7 @@ int main(int argc, char **argv)
         // Sampled once and passed to both: reading /proc twice, once for the
         // periodic message and once for the event check, lets them disagree.
         const Sample s = take_sample();
-        publish_periodic(cfg, s);
+        publish_periodic(cfg, s, split);
         publish_events(cfg, s, th, st);
         if (once) return 0;
         sleep(unsigned(interval));

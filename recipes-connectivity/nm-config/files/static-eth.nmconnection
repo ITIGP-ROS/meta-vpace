@@ -56,6 +56,20 @@
 # is quiet, check this file before you suspect the sensor.
 #
 # Installed 0600 by nm-config.bb; NetworkManager ignores keyfiles with looser permissions.
+#
+# WHERE THIS FILE LIVES ON THE TARGET, AND WHY IT MOVED:
+# /usr/lib/NetworkManager/system-connections/, NOT /etc/NetworkManager/system-connections/.
+#
+# 20-keyfile-path.conf repoints NetworkManager's WRITABLE store at /data so learned WiFi
+# profiles survive a flash, and [keyfile] path= REPLACES the /etc directory rather than
+# adding to it -- a copy left in /etc would silently stop being read and this link would
+# go dead with no error. /usr/lib is one of the read-only directories NetworkManager reads
+# regardless of path=, so an image-provided profile belongs there.
+#
+# Consequence: this profile is READ-ONLY on the target. `nmcli connection modify static-eth`
+# will not edit it in place -- NetworkManager writes a copy into the /data store instead,
+# which then SHADOWS this one and is not what the next flash ships. Edit this file in the
+# layer and rebuild; do not tune it live and expect it to stick.
 # ============================================================================
 
 [connection]

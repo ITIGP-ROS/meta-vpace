@@ -13,7 +13,6 @@ SRC_URI = "\
     file://aes_cmac.c \
     file://aes_cmac.h \
     file://secoc.key \
-    file://wifi-cred-tmpfiles.conf \
 "
 
 # Portable across Yocto releases: scarthgap+ defines UNPACKDIR (files land in
@@ -22,8 +21,18 @@ SRC_URI = "\
 UNPACKDIR ?= "${WORKDIR}"
 S = "${UNPACKDIR}"
 
-# The freshness counter lives here. It MUST survive reboot — see README.
-FVDIR = "${localstatedir}/lib"
+# The freshness counter lives at /data/secoc/wifi_cred_txfv (compiled into
+# wifi_cred_send.cpp as the default, overridable with -F).
+#
+# It is NOT staged from this recipe, and there is no FVDIR any more. /data is
+# nvme0n1p15, a mount point — anything installed into it at image build time is
+# hidden the moment the partition mounts and would never be seen. The file and
+# its weston ownership are created at boot by mount-data-partition.sh, which is
+# also the only place that can check the mount actually succeeded.
+#
+# It lives there rather than under /var/lib because it must survive a FLASH,
+# not merely a reboot: the rootfs is the A/B pair SWUpdate replaces, while the
+# QNX cluster and the ESP32 keep their own freshness floors across it.
 
 do_compile() {
     ${CC} ${CFLAGS} -c -o aes_cmac.o ${S}/aes_cmac.c
@@ -38,13 +47,8 @@ do_install() {
     # Install the secret key
     install -d ${D}${sysconfdir}
     install -m 0444 ${S}/secoc.key ${D}${sysconfdir}/wifi_secoc.key
-
-    # Pre-create the freshness state file as the weston user at boot, so the
-    # IVI app (runs as weston) can persist the counter to /var/lib.
-    install -d ${D}${nonarch_libdir}/tmpfiles.d
-    install -m 0644 ${S}/wifi-cred-tmpfiles.conf ${D}${nonarch_libdir}/tmpfiles.d/
-
-    install -d ${D}${FVDIR}
 }
 
-FILES:${PN} += "${sysconfdir}/wifi_secoc.key ${nonarch_libdir}/tmpfiles.d"
+RDEPENDS:${PN} += "data-partition-mount"
+
+FILES:${PN} += "${sysconfdir}/wifi_secoc.key"

@@ -3,10 +3,48 @@ Description=Update Coordinator — SecOC CAN-based ECU firmware update orchestra
 After=network.target can-config.service
 Wants=can-config.service
 
+# The SecOC freshness counters live on /data (see state_dir below), so this
+# node cannot start before that partition is up.
+#
+# Requires=/After= the concrete mount SERVICE, deliberately NOT
+# RequiresMountsFor=/data: on the first boot after a flash /etc/fstab has no
+# /data line when systemd-fstab-generator runs -- mount-data-partition.sh is
+# what appends it -- so no data.mount unit exists at generator time and
+# RequiresMountsFor would have nothing to bind to.
+Requires=data-partition-mount.service
+After=data-partition-mount.service
+
 [Service]
 Type=simple
 Environment=HOME=/root
-ExecStart=/bin/sh -c '. /opt/ros/humble/setup.bash && exec ros2 run update_coordinator update_coordinator --ros-args -p secoc_key:=/etc/ota_secoc.key -p can_iface:=can0 -p timeout_sec:=1200.0'
+
+# FAIL CLOSED if /data is not really mounted.
+#
+# Without this the node happily writes its counters to the rootfs directory
+# under the mount point. That works until the next flash, which resets them
+# while the QNX cluster and the ESP32 keep counting -- and from then on our
+# APPROVE frames are rejected by peers whose floors we can no longer guess,
+# with the rejection logged on THEIR side only. A coordinator that refuses to
+# start is loud in `systemctl status`; one that burns freshness into a volatile
+# path is silent and, once the peer floors have moved on, not self-recoverable.
+#
+# Accepted trade-off: a board with a broken /data has no OTA coordination at
+# all. That is the cheaper failure. Note this is the OPPOSITE choice to the
+# NetworkManager drop-in, which ignores a missing /data on purpose -- there,
+# failing closed would take SSH down with it.
+#
+# Via /bin/sh rather than an absolute /bin/mountpoint: ExecStartPre needs an
+# absolute path, and which of /bin or /usr/bin ships mountpoint depends on the
+# util-linux split and on usrmerge. A guard that fails because the binary moved
+# would block OTA for a reason that has nothing to do with /data. /bin/sh is
+# already proven present by the ExecStart below.
+ExecStartPre=/bin/sh -c 'mountpoint -q /data'
+
+# state_dir is a declared ROS parameter (node.py), so pointing the FvStore at
+# /data needs no change to the ros2_ws_gp repo. FvStore does its own
+# os.makedirs(), and this unit runs as root, so the directory creates itself;
+# mount-data-partition.sh only pre-sets the mode.
+ExecStart=/bin/sh -c '. /opt/ros/humble/setup.bash && exec ros2 run update_coordinator update_coordinator --ros-args -p secoc_key:=/etc/ota_secoc.key -p can_iface:=can0 -p timeout_sec:=1200.0 -p state_dir:=/data/secoc/update_coordinator'
 Restart=on-failure
 RestartSec=5
 

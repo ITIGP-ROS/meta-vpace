@@ -103,7 +103,12 @@ enum {
 struct Opts {
     std::string iface   = "can0";
     std::string keypath = "secoc.key";
-    std::string fvpath  = "/var/lib/wifi_cred_txfv";
+    /* ON /data, NOT /var. The rootfs is the A/B pair SWUpdate replaces, so a
+     * counter under /var/lib is reset by every flash while the receivers keep
+     * their floors. /data (nvme0n1p15) survives. The file is pre-created
+     * weston-writable by mount-data-partition.sh, because the caller is the IVI
+     * app and it does not run as root. */
+    std::string fvpath  = "/data/secoc/wifi_cred_txfv";
     std::string ssid;
     std::string pass;
     /* Defaults to BOTH: on this vehicle the Jetson is the provisioning source
@@ -144,7 +149,7 @@ static void usage(const char *argv0)
         "  --cred-id <n> override the credential CAN ID (single target only)\n"
         "  --fc-id <n>   override the flow-control CAN ID\n"
         "  -f <n>        explicit freshness value (default: auto, monotonic)\n"
-        "  -F <file>     freshness state file     (default /var/lib/wifi_cred_txfv)\n"
+        "  -F <file>     freshness state file     (default /data/secoc/wifi_cred_txfv)\n"
         "  -j, --json    print one JSON line with the result (one line PER TARGET\n"
         "                when --target both)\n"
         "  -n            dry run: build and print frames, send nothing\n"
@@ -249,7 +254,17 @@ static bool load_key(const std::string &path, uint8_t key[16])
 /* ----------------------------- freshness counter -------------------------- */
 /* The host only checks "strictly greater than last accepted", so any monotonic
  * source works. Unix time is monotonic across reboots; the state file only
- * breaks ties when two sends land in the same second. */
+ * breaks ties when two sends land in the same second.
+ *
+ * That Unix-time base is what makes THIS counter far more forgiving than the
+ * OTA one in update_coordinator: even with the state file destroyed, a board
+ * with a correct clock still produces a value above anything it sent before,
+ * and the receivers accept it. The store lives on /data anyway (see Opts::
+ * fvpath) because the one case it does not cover is a WRONG CLOCK -- no RTC
+ * battery, no NTP yet, time() near the epoch -- where every send falls under
+ * the receiver's floor and is dropped. There is no local symptom when that
+ * happens: the receivers return no verdict over CAN, so acceptance is only
+ * visible in the QNX log. */
 static uint32_t load_last_fv(const std::string &path)
 {
     FILE *f = fopen(path.c_str(), "r");

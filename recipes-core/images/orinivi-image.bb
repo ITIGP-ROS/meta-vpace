@@ -115,3 +115,37 @@ IMAGE_INSTALL:append = " \
     teleop-twist-joy \
     teleop-twist-keyboard \
 "
+
+# --- TensorRT dev tools (ONNX -> TRT engine conversion on device) ---
+#
+# NVIDIA requires TensorRT engines be built ON THE TARGET, so an x86 build host cannot produce
+# them -- and until now neither could the Jetson, because tensorrt-core ships libnvinfer but no
+# ONNX parser. That blocked all TensorRT work. With the parser present we ship a portable .onnx
+# and let the device build and cache its own engine on first boot, which also removes a real
+# failure mode: a prebuilt .engine is bound to an exact TensorRT version and stops loading
+# silently if the image moves to a different L4T.
+#
+# tensorrt-plugins-prebuilt is what carries libnvonnxparser.so.10.3.0 (plus .so.10 and .so).
+# It also brings libnvinfer_plugin, which CUDA-PointPillars does NOT need -- that registers its
+# pillar-scatter plugin from inside its own binary via REGISTER_TENSORRT_PLUGIN -- but the two
+# ship in the same package.
+#
+# TWO THINGS THAT WILL OTHERWISE COST SOMEONE AN AFTERNOON:
+#
+#   * trtexec IS NOT ON $PATH. tensorrt-trtexec-prebuilt sets FILES:${PN} to
+#     ${prefix}/src/tensorrt/bin, so it lands at /usr/src/tensorrt/bin/trtexec.
+#
+#   * The UNVERSIONED libnvonnxparser.so symlink goes to the -dev package, per the default
+#     FILES_SOLIBSDEV. Runtime is fine -- the SONAME is libnvonnxparser.so.10, which is in the
+#     runtime package -- but anything COMPILING against -lnvonnxparser on the device also needs
+#     tensorrt-plugins-prebuilt-dev.
+#
+# No PREFERRED_PROVIDER needed here: meta-tegra's tegra-common.inc already pins
+# tensorrt-plugins and tensorrt-trtexec to the -prebuilt recipes, so the source-built
+# tensorrt-plugins under meta-tegra/external/openembedded-layer/ does not collide.
+#
+# This image is TensorRT 10.3.0.30 (libnvinfer.so.10.3.0), NOT 8.6.
+IMAGE_INSTALL:append = " \
+    tensorrt-trtexec-prebuilt \
+    tensorrt-plugins-prebuilt \
+"

@@ -1,0 +1,47 @@
+From: V-PACE <yocto@vpace>
+Subject: [PATCH] mcap_vendor: link libmcap against zstd
+
+libmcap.so calls zstd (ZSTD_CCtx_setParameter and friends, from the mcap
+headers' compressed-chunk writer) but its DT_NEEDED lists only libc, libgcc
+and libstdc++. Nothing resolves those symbols at dlopen time, so the mcap
+storage plugin aborts as soon as pluginlib actually loads it:
+
+    libmcap.so: undefined symbol: ZSTD_CCtx_setParameter
+    [FATAL] No storage could be initialized. Abort
+
+It stays hidden until someone asks for it: rosbag2 defaults to sqlite3, and
+`ros2 bag list storage` reads the plugin's XML manifest without dlopening the
+library, so mcap is advertised as available regardless.
+
+Upstream mcap_vendor links zstd via `ament_target_dependencies(mcap zstd)`.
+meta-ros's 0001-CMakeLists.txt-fetch-dependencies-with-bitbake-fetch.patch
+replaced find_package(zstd) with pkg_check_modules(ZSTD libzstd REQUIRED) --
+correct for OE -- but reduced that call to `ament_target_dependencies(mcap)`,
+i.e. a no-op, leaving the ZSTD_* results it had just computed unused. This
+restores the link using them.
+
+target_link_libraries rather than a linker flag because OE builds with
+-Wl,--as-needed, which drops -lzstd whenever it precedes the objects that
+reference it; only target_link_libraries guarantees the ordering. PRIVATE
+because the DT_NEEDED belongs to libmcap.so alone -- keeping it off the
+INTERFACE leaves the ament_export_targets(mcap HAS_LIBRARY_TARGET) export
+unchanged for rosbag2_storage_mcap, which finds zstd on its own.
+
+This applies on top of the meta-ros patch named above, so it is not a
+candidate for upstream.
+
+Upstream-Status: Inappropriate [oe specific]
+
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -51,7 +51,8 @@ macro(build_mcap_vendor)
+     "$<BUILD_INTERFACE:${_mcap_include_dir}>"
+     "$<INSTALL_INTERFACE:include/${PROJECT_NAME}>"
+   )
+-  ament_target_dependencies(mcap)
++  target_include_directories(mcap PRIVATE ${ZSTD_INCLUDE_DIRS})
++  target_link_libraries(mcap PRIVATE ${ZSTD_LDFLAGS})
+ 
+   install(
+     FILES ${_mcap_installed_headers}

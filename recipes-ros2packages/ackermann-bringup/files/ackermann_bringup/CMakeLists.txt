@@ -49,9 +49,21 @@ install(DIRECTORY config launch maps
 )
 
 
+# NOTHING HERE MAY PUBLISH TO /cmd_vel_stamped.
+#
+# odom_test.py and circle_test.py used to be installed here and were REMOVED as a
+# safety defect. Both published directly to /cmd_vel_stamped, which robot.launch.py
+# gives to the controller as /ackermann_controller/reference — i.e. DOWNSTREAM of
+# twist_mux, and therefore downstream of the emergency_stop lock (priority 255 in
+# twist_mux_locks.yaml). Running either one drove the vehicle with the emergency stop
+# bypassed. They were verified installed and runnable on the unit at
+# /opt/ros/humble/lib/ackermann_bringup/.
+#
+# Anything that commands motion must go in through twist_mux — /cmd_vel_teleop,
+# /cmd_vel_nav_smoothed or /cmd_vel_recovery — never at the controller's input.
+# twist_stamper.py is the one legitimate publisher of /cmd_vel_stamped: it is the
+# bridge that stamps twist_mux's own /cmd_vel output, so it sits INSIDE the chain.
 install(PROGRAMS
-  src/odom_test.py
-  src/circle_test.py
   src/twist_stamper.py
   src/camera_compressor.py
   DESTINATION lib/${PROJECT_NAME}
@@ -60,8 +72,6 @@ install(PROGRAMS
 install(CODE "
   execute_process(COMMAND chmod +x
     ${CMAKE_INSTALL_PREFIX}/lib/${PROJECT_NAME}/twist_stamper.py
-    ${CMAKE_INSTALL_PREFIX}/lib/${PROJECT_NAME}/odom_test.py
-    ${CMAKE_INSTALL_PREFIX}/lib/${PROJECT_NAME}/circle_test.py
     ${CMAKE_INSTALL_PREFIX}/lib/${PROJECT_NAME}/camera_compressor.py
   )
 ")

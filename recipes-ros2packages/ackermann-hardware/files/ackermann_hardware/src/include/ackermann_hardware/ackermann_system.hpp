@@ -108,6 +108,20 @@ private:
   double imu_gyro_z_offset_ = 0.0;
   const int IMU_CALIBRATION_SAMPLES = 200; // ~4 seconds at 50Hz
 
+  // Settle window before gyro sampling starts. on_activate() centres the steering,
+  // which physically moves the vehicle; sampling the gyro during that motion biases
+  // the offset. This USED TO BE a blocking rclcpp::sleep_for(1500ms) inside
+  // on_activate(), and that block was itself a bug: it stalled the controller_manager
+  // loop, which then ran ~45 cycles back to back to catch up and tripped the encoder
+  // staleness check within a millisecond of "Successfully activated!".
+  //
+  // Counting cycles here instead costs nothing — calibration was ALREADY spread across
+  // read() cycles (IMU_CALIBRATION_SAMPLES above) — and it keeps activation
+  // non-blocking, which is what makes ENC_STALE_LIMIT_S below safe. Do not put the
+  // sleep back.
+  int activation_settle_cycles_ = 0;
+  static constexpr int ACTIVATION_SETTLE_CYCLES = 45; // ~1.5 s at 30 Hz
+
   // hardware_interface::SystemInterface is not a Node and exposes no get_clock(),
   // so throttled logging needs its own clock. Steady time: this only paces log
   // output, and must not be affected by sim-time or wall-clock jumps.
@@ -123,14 +137,26 @@ private:
   size_t can_write_failures_ = 0;
   static constexpr size_t CAN_WRITE_FAILURE_LIMIT = 5; // ~166 ms at 30 Hz
 
-  // Encoder-loss tracking (read side). Counts CONSECUTIVE cycles with no 0x110;
-  // any encoder frame resets it, as does (re)activation. The limit is 10 rather
-  // than the write side's 5 because a transient encoder drop is more plausible
-  // than a bus-off, while ~333 ms is still far too short for the robot to run
-  // away. The encoder is the EKF's ONLY forward-velocity source, so sustained
-  // loss means there is no trustworthy vx at all.
-  size_t enc_read_failures_ = 0;
-  static constexpr size_t ENC_READ_FAILURE_LIMIT = 10; // ~333 ms at 30 Hz
+  // Encoder-loss tracking (read side), gated on MEASURED TIME via enc_dt_accum_.
+  // Tolerated for longer than the write side's 5 cycles because a transient encoder
+  // drop is more plausible than a bus-off, while 333 ms is still far too short for
+  // the robot to run away. The encoder is the EKF's ONLY forward-velocity source, so
+  // sustained loss means there is no trustworthy vx at all.
+  //
+  // THIS USED TO COUNT CYCLES (ENC_READ_FAILURE_LIMIT = 10) AND ASSUMED 33.3 ms EACH.
+  // That assumption fails exactly when it matters. The old blocking on_activate() made
+  // controller_manager run its backlog back to back, so ten "consecutive cycles" could
+  // elapse in ~1 ms — measured on the unit, the ERROR landed 1 ms after "Successfully
+  // activated!" and the component left ACTIVE permanently: write() stops being called,
+  // 0x100/0x120 stop, and every re-activation re-trips it, so the vehicle is dead for
+  // the session with no operator-visible message.
+  //
+  // Holding the last good encoder value for 333 ms costs at most 0.2 m/s x 0.333 =
+  // 6.7 cm of odometry error at campaign speed. That is the whole price, against
+  // losing the remainder of a drive.
+  //
+  // Safe only because on_activate() no longer blocks — see ACTIVATION_SETTLE_CYCLES.
+  static constexpr double ENC_STALE_LIMIT_S = 0.333;
 
   double dummy_front_wheel_pos_ = 0.0;
   double dummy_front_wheel_vel_ = 0.0;

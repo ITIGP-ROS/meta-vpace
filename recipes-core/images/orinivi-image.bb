@@ -114,6 +114,7 @@ IMAGE_INSTALL:append = " \
     joy \
     teleop-twist-joy \
     teleop-twist-keyboard \
+    ros2controlcli \
 "
 
 # --- TensorRT dev tools (ONNX -> TRT engine conversion on device) ---

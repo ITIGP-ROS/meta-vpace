@@ -285,14 +285,21 @@ hardware_interface::CallbackReturn AckermannHardwareSystem::on_activate(
   // enc/pos/vel and the elapsed-time accumulator keeps host and Tiva consistent.
   wheel_l_.enc = 0;  wheel_l_.pos = 0.0;  wheel_l_.vel = 0.0;
   wheel_r_.enc = 0;  wheel_r_.pos = 0.0;  wheel_r_.vel = 0.0;
-  enc_dt_accum_ = 0.0;
-  enc_read_failures_ = 0;   // fresh start: a prior session's loss must not carry over
+  enc_dt_accum_ = 0.0;   // fresh start: a prior session's loss must not carry over
 
   // Center steering — Tiva-C handles angle->PWM mapping locally
   can_comms_.set_steering(0.0f);
-  
-  // Delay to avoid movement interference with IMU Calibration
-  rclcpp::sleep_for(std::chrono::milliseconds(1500));
+
+  // Let that steering movement settle before the gyro is sampled — but WITHOUT
+  // blocking. This was rclcpp::sleep_for(1500ms), which stalled controller_manager's
+  // loop for 1.5 s; it then ran the backlog back to back and the encoder staleness
+  // check (which counted cycles, not time) fired 1 ms after "Successfully activated!",
+  // knocking the component out of ACTIVE for the rest of the session.
+  //
+  // read() now counts the settle window down instead, so activation returns
+  // immediately, there is no catch-up burst, and no cycle carries an oversized period.
+  // ENC_STALE_LIMIT_S depends on that: do not reintroduce a blocking call here.
+  activation_settle_cycles_ = ACTIVATION_SETTLE_CYCLES;
 
   // Reset IMU Calibration state on activate
   is_imu_calibrating_ = true;
@@ -364,7 +371,27 @@ hardware_interface::return_type AckermannHardwareSystem::read(
           RCLCPP_WARN(rclcpp::get_logger("AckermannHardwareSystem"),
                       "Steering command exceeded mechanical travel and was clamped!");
       }
-      steering_.set_rack_position(steer_fb.angle);
+
+      // pot_fault means the ANGLE IN THIS FRAME IS GARBAGE — observed at -1.335 rad,
+      // roughly 4.7x the mechanical limit. It used to be written in anyway: the flag
+      // was decoded, logged once, and then set_rack_position() ran regardless, so the
+      // impossible value reached the steering state, joint states and odometry. Hold
+      // the last good angle instead — the same thing the cluster is already told to do
+      // when it greys out the display. Rare (order one frame in several thousand), so
+      // a hold is a far better estimate than the fault value.
+      if (!steer_fb.pot_fault) {
+          steering_.set_rack_position(steer_fb.angle);
+      } else {
+          // Edge-triggered warnings fire once. A pot that fails and STAYS failed would
+          // then freeze steering feedback silently forever, which is the same class of
+          // silent-wrong-data defect this guard exists to end. Keep it visible.
+          RCLCPP_WARN_THROTTLE(
+            rclcpp::get_logger("AckermannHardwareSystem"), throttle_clock_, 2000,
+            "Steering pot fault SUSTAINED — holding last good steering position "
+            "(L %.4f / R %.4f rad). Steering feedback, joint states and odometry are "
+            "frozen on this axis.",
+            steering_.left_pos, steering_.right_pos);
+      }
   }
   prev_pot_fault = steer_fb.pot_fault;
   prev_out_of_range = steer_fb.out_of_range;
@@ -401,10 +428,16 @@ hardware_interface::return_type AckermannHardwareSystem::read(
     double raw_gyro_z = imu_data[5];
     
     if (is_imu_calibrating_) {
-        if (!is_imu_reset) {
+        // Settle window (replaces the old blocking sleep in on_activate). While it
+        // runs, frames are read and discarded: centring the steering physically moves
+        // the vehicle, and averaging gyro samples taken during that motion would bake
+        // the movement into the zero offset. Sampling starts only once it expires.
+        if (activation_settle_cycles_ > 0) {
+            --activation_settle_cycles_;
+        } else if (!is_imu_reset) {
             imu_gyro_z_sum_ += raw_gyro_z;
             imu_calibration_sample_count_++;
-            
+
             if (imu_calibration_sample_count_ >= IMU_CALIBRATION_SAMPLES) {
                 imu_gyro_z_offset_ = imu_gyro_z_sum_ / IMU_CALIBRATION_SAMPLES;
                 is_imu_calibrating_ = false;
@@ -447,7 +480,6 @@ hardware_interface::return_type AckermannHardwareSystem::read(
     }
 
     enc_dt_accum_ = 0.0;
-    enc_read_failures_ = 0;
   }
   else
   {
@@ -460,13 +492,20 @@ hardware_interface::return_type AckermannHardwareSystem::read(
     // source), and holding a stale vx forever would be the same class of silent
     // wrong data that R-E was. So escalate, mirroring the write-side bus-off
     // counter: stop rather than drive blind.
-    if (++enc_read_failures_ >= ENC_READ_FAILURE_LIMIT)
+    //
+    // Gated on MEASURED elapsed time, not on a cycle count. enc_dt_accum_ is
+    // incremented by the real period every cycle above and reset only by a fresh
+    // 0x110, so it IS the age of the newest trustworthy encoder frame. Counting
+    // cycles and multiplying by a nominal 33.3 ms lied whenever the loop was not at
+    // rate — which is exactly when the loop is in trouble.
+    if (enc_dt_accum_ >= ENC_STALE_LIMIT_S)
     {
       RCLCPP_ERROR(
         rclcpp::get_logger("AckermannHardwareSystem"),
-        "No encoder (0x110) for %zu consecutive cycles (~%d ms) — no trustworthy "
+        "No encoder (0x110) for %d ms of measured time (limit %d ms) — no trustworthy "
         "odometry; returning ERROR.",
-        enc_read_failures_, static_cast<int>(enc_read_failures_ * 1000 / 30));
+        static_cast<int>(enc_dt_accum_ * 1000.0),
+        static_cast<int>(ENC_STALE_LIMIT_S * 1000.0));
       return hardware_interface::return_type::ERROR;
     }
   }

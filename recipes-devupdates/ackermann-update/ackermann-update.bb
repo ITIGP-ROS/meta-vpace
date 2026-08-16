@@ -14,7 +14,7 @@ SRC_URI = " \
 
 S = "${WORKDIR}/${PN}"
 
-ACKERMANN_VERSION = "1.0.5"
+ACKERMANN_VERSION = "1.0.6"
 
 # Depend on the ackermann packages to produce the tarballs
 IMAGE_DEPENDS = "ackermann-description ackermann-bringup ackermann-hardware"

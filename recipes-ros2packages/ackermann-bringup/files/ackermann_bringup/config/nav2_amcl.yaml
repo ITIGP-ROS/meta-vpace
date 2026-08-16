@@ -180,6 +180,15 @@ controller_server:
         # delta @ R=1.00 = atan(0.2359/1.00) = 0.2317 rad, 4.2% inside the clamp.
         # ⚠️ Still ABOVE the servo's measured ~0.222 rad PWM-saturation onset (item 105);
         # a radius fully clear of that is ~1.05, deliberately NOT taken here — see item 106.
+        #
+        # 🔜 PENDING: the Tiva steering calibration was re-measured and flashed 2026-08-16
+        # (car-like 42b6fed). The old figures were wrong by 2.31x left / 1.91x right, and
+        # the new firmware clamp is 0.286 rad. Once the perception team's ground check
+        # passes (one circle at delta 0.15 rad, expected ~3.10 m diameter) this becomes
+        # 0.84 — together with minimum_turning_radius below and controllers.yaml
+        # max_steering_angle -> 0.286. All three move as ONE change or not at all.
+        # 0.84 NOT 0.80: L/tan(0.286) = 0.80 exactly, which puts commanded steering ON
+        # the clamp with zero margin — the identical condition item 105 was raised to fix.
         min_turning_r: 1.00
       
       # Critics
@@ -380,6 +389,16 @@ planner_server:
       # measured R=0.96 putting the commanded average steering at EXACTLY the 0.2421
       # clamp — 0.4% of nominal margin, and none at all in practice (item 105).
       # Must stay EQUAL to MPPI's AckermannConstraints.min_turning_r (item 92).
+      #
+      # THIS FILE IS THE ONLY NAV2 PARAMS FILE. A second one, nav2_params_amcl.yaml,
+      # used to sit beside it carrying a third, disagreeing pair (0.80 here / 0.65 for
+      # min_turning_r — inconsistent with each other, so it broke the "must stay equal"
+      # rule on its own). Nothing referenced it: nav2.launch.py and amcl.launch.py both
+      # default params_file to nav2_amcl.yaml. DELETED 2026-08-16 so nobody edits the
+      # wrong one. Do not restore it.
+      #
+      # 🔜 PENDING: becomes 0.84 with the post-calibration change — see the note at
+      # min_turning_r above. Both values and controllers.yaml move together.
       minimum_turning_radius: 1.00
       reverse_penalty: 2.0 #1.0 = no cost
       change_penalty: 1.0

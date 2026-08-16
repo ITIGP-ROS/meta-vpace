@@ -107,6 +107,18 @@
         <origin xyz="0.15 0 0.279" rpy="0 0 0"/>
     </joint>
 
+    <!-- Frame for the Mid-360 internal IMU, which publishes /livox/imu.
+         PROVISIONAL OFFSET - identity is a placeholder, not the real extrinsic.
+         Replace with the measured value before trusting any LIO result. -->
+
+    <link name="livox_frame"/>
+
+    <joint name="livox_imu_joint" type="fixed">
+        <parent link="lidar_link"/>
+        <child link="livox_frame"/>
+        <origin xyz="0 0 0" rpy="0 0 0"/>
+    </joint>
+
     <!-- ====== LIDAR GAZEBO ======= -->
      <gazebo reference="lidar_link">
         <!-- Classic uses 'ray' instead of 'gpu_lidar' -->

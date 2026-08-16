@@ -9,6 +9,24 @@ Wants=network-online.target
 # RTC boots at epoch. Not a hard dependency: a working NTP is not guaranteed.
 After=systemd-timesyncd.service
 
+# The installed-version file lives on /data (see VERSION_FILE in the agent), so
+# order after the mount.
+#
+# Wants=, NOT Requires=: this agent FAILS OPEN on a missing /data. It degrades to
+# a non-persistent version file and says so in the journal, rather than refusing
+# to start -- an agent that will not start also stops answering the dashboard's
+# ping and version queries, so the board reads as dead instead of degraded. This
+# is the opposite choice to update-coordinator.service, which fails closed on the
+# same partition because burning SecOC freshness into a volatile path is not
+# self-recoverable, while a lost version number is.
+#
+# The concrete unit rather than RequiresMountsFor=/data, for the reason spelled
+# out in update-coordinator.service: on the first boot after a flash /etc/fstab
+# has no /data line when systemd-fstab-generator runs -- mount-data-partition.sh
+# is what appends it -- so there is no data.mount unit to bind to.
+Wants=data-partition-mount.service
+After=data-partition-mount.service
+
 [Service]
 Type=simple
 ExecStart=/usr/bin/ivi_ota_agent.sh

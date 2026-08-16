@@ -30,6 +30,14 @@ fi
 #             so a reflashed board rejoins the last network it was on instead
 #             of needing a keyboard and a monitor.
 #
+#   ota/      The OTA agent's record of which version is installed -- one file,
+#             shared by the IVI app and ackermann payload channels. Lose it and
+#             the board reports its INITIAL_VERSION floor instead: it reinstalls
+#             the campaign it is already running (holding the vehicle while it
+#             does), and the ALLOW_DOWNGRADE gate stops rejecting replayed old
+#             packages, which is the one attack swupdate's signature check does
+#             not cover.
+#
 # EVERYTHING BELOW IS GUARDED ON THE MOUNT HAVING ACTUALLY SUCCEEDED. Creating
 # these under an unmounted /data writes them to the rootfs directory hiding
 # beneath the mount point, which looks like it works and then silently loses
@@ -84,4 +92,14 @@ if mountpoint -q "$DATA_MNT"; then
     chmod 0700 "$DATA_MNT/network" \
                "$DATA_MNT/network/system-connections" \
                "$DATA_MNT/network/nm-state"
+
+    # --- OTA installed version ---------------------------------------------
+    # Only the directory -- the OPPOSITE of the wifi_cred_txfv treatment above.
+    # There, an empty file is exactly equivalent to a missing one. Here it is
+    # not: a version file is either a valid semver or it is absent, and
+    # ivi_ota_agent.sh runs as root and writes it itself after a successful
+    # install. Pre-creating an empty one would only give installed_version()
+    # something to reject.
+    mkdir -p "$DATA_MNT/ota"
+    chmod 0700 "$DATA_MNT/ota"
 fi

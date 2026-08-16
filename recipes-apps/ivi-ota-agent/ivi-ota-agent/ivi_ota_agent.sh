@@ -87,8 +87,9 @@ lock_system() {
 }
 
 # MUST run on every path out of run_update(), successful or not. The coordinator
-# does have a 300 s timeout that force-releases a stuck update, but relying on it
-# means five minutes of an immobilised car after a download that failed in two
+# does have a timeout that force-releases a stuck update, but it is set to 1200 s
+# in update-coordinator.service (-p timeout_sec:=1200.0), so relying on it means
+# TWENTY MINUTES of an immobilised car after a download that failed in two
 # seconds.
 unlock_system() {
     _ros2_call /update_coordinator/self_done std_srvs/srv/Trigger "{}"
@@ -171,13 +172,84 @@ LAST_TRY_FILE="$WORKDIR/.last_try"
 # and this image exposes none, so the agent owns this file: written only after a
 # successful install, seeded from INITIAL_VERSION on first boot.
 #
+# ============================================================================
+# THIS LIVES ON /data, AND DELIBERATELY *NOT* UNDER $WORKDIR.
+#
+# WORKDIR is /var/lib/ivi-ota, which is on the A/B rootfs pair nvme0n1p1/p2.
+# Payload updates (the IVI app, the ackermann stack) write into the RUNNING
+# rootfs via their lua scripts, so those preserve it -- but a full rootfs .swu
+# swaps the partition wholesale and the file is gone. /data is nvme0n1p15 and
+# survives. Same reasoning as the SecOC counters and the WiFi profiles that
+# already live there; see mount-data-partition.sh.
+#
+# The decoupling from $WORKDIR is load-bearing, not tidiness: agent.conf is
+# sourced ABOVE this block and pins WORKDIR=/var/lib/ivi-ota, so deriving the
+# path from it would put the file straight back on the rootfs. An explicit
+# VERSION_FILE= in agent.conf still overrides this, which is the escape hatch.
+#
+# WHAT LOSING IT COSTS -- it is not a cosmetic counter:
+#   - The downgrade gate is DEFEATED. Read the header: a replayed old-but-signed
+#     package passes swupdate's signature check, and this version compare is the
+#     only thing that stops it. A board reporting INITIAL_VERSION accepts every
+#     archived campaign above that floor.
+#   - The next boot REINSTALLS. Adafruit's /get replays the last campaign, the
+#     idempotence check below no longer matches, and since approval triggers
+#     lock_system that holds the vehicle for the whole install.
+#   - Both delivery paths desync at once. This is ONE counter shared by
+#     ivi-update and ackermann-update (see ackermann-update.bb) -- not one per
+#     target.
+#
 # If your build maintains /etc/sw-versions, that is the more canonical source and
 # this can be pointed at it -- but it must agree with the `version` field in the
-# package's sw-description or the downgrade gate compares the wrong things.
-VERSION_FILE="${VERSION_FILE:-$WORKDIR/installed_version}"
+# package's sw-description or the downgrade gate compares the wrong things, and
+# /etc is on the rootfs, so it would reintroduce exactly the problem above.
+# ============================================================================
+VERSION_FILE="${VERSION_FILE:-/data/ota/installed_version}"
 
 mkdir -p "$WORKDIR"
 chmod 700 "$WORKDIR"
+
+# --- the version file's home ------------------------------------------------
+# mount-data-partition.sh creates /data/ota at boot, but only when /data really
+# mounted. Recreate it here rather than assuming, and NON-FATALLY: `set -e` is on
+# and this must not be able to stop the agent from starting.
+_vdir=$(dirname "$VERSION_FILE")
+mkdir -p "$_vdir" 2>/dev/null || :
+
+# FAIL OPEN, LOUDLY. A missing /data degrades to a non-persistent version file
+# rather than refusing to run -- the opposite choice to update-coordinator.service,
+# which fails closed on the same partition. The trade is deliberate: an OTA agent
+# that will not start also stops answering the dashboard's ping and version
+# queries, so the board looks dead rather than degraded. The INITIAL_VERSION floor
+# in agent.conf is what keeps this state safe -- it must name the version actually
+# baked into the image, NOT 0.0.0, or the downgrade gate is wide open here.
+#
+# Only warn when the file is ACTUALLY meant to be on /data (an operator who
+# overrode VERSION_FILE elsewhere does not need to hear about the partition), and
+# only when mountpoint exists -- a missing binary must not produce a scary line
+# every boot about a partition that is fine.
+case "$VERSION_FILE" in
+  /data/*)
+    if command -v mountpoint >/dev/null 2>&1 && ! mountpoint -q /data; then
+        warn "/data is NOT mounted -- $VERSION_FILE is on the rootfs and will be LOST
+     on the next full update. The board will then report INITIAL_VERSION and
+     reinstall whatever campaign is on the feed. Check: findmnt /data"
+    fi
+    ;;
+esac
+
+# One-time migration off the old rootfs path.
+#
+# Only fires on an IN-PLACE agent update, where the rootfs that holds the legacy
+# file is still the running one. After an A/B swap /var/lib is empty and there is
+# nothing to find -- that case is covered by INITIAL_VERSION, not by this.
+if [ ! -e "$VERSION_FILE" ] && [ -r "$WORKDIR/installed_version" ]; then
+    if cp "$WORKDIR/installed_version" "$VERSION_FILE" 2>/dev/null; then
+        log "migrated installed version $(cat "$VERSION_FILE") from $WORKDIR to $VERSION_FILE"
+    else
+        warn "could not migrate $WORKDIR/installed_version to $VERSION_FILE"
+    fi
+fi
 
 # Sleep in one-second slices so that when report() kills this watchdog, the most
 # it can orphan is a single `sleep 1` rather than the whole remaining window.
@@ -244,10 +316,20 @@ report() {
 
 installed_version() {
     if [ -r "$VERSION_FILE" ]; then
-        cat "$VERSION_FILE"
-    else
-        echo "${INITIAL_VERSION:-0.0.0}"
+        _iv=$(cat "$VERSION_FILE" 2>/dev/null) || _iv=""
+        # Validate rather than trust. An empty or malformed file is NOT the same
+        # as a missing one: cut would hand "" to ver_gt, ${_x:-0} would turn that
+        # into 0, and the downgrade gate would be off with nothing in the log to
+        # say so. A truncated write is now impossible (see the mv below), but a
+        # hand-edit typo is not -- and this file is meant to be hand-editable.
+        if echo "$_iv" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "$_iv"
+            return 0
+        fi
+        warn "$VERSION_FILE does not contain a version ('$_iv') -- falling back to
+     ${INITIAL_VERSION:-0.0.0}. Fix it by hand: echo 1.0.6 > $VERSION_FILE"
     fi
+    echo "${INITIAL_VERSION:-0.0.0}"
 }
 
 # --- driver approval ---------------------------------------------------------
@@ -574,7 +656,28 @@ run_update() {
     # shellcheck disable=SC2086
     if swupdate $SWUPDATE_ARGS -i "$_swu"; then
         log "update to $_ver applied"
-        echo "$_ver" > "$VERSION_FILE"
+        # NOT a bare redirect. `set -e` is on and we are between lock_system and
+        # unlock_system: a failed write (read-only /data, full partition, missing
+        # directory) would kill the shell right here, the release would never run,
+        # and the vehicle would stay immobilised until the coordinator's
+        # timeout_sec force-releases it -- 1200 s, twenty minutes, per
+        # update-coordinator.service.
+        #
+        # So the failure is downgraded to a warning. The cost is one spurious
+        # reinstall on the next campaign, because we will still believe we are on
+        # the old version. That is much cheaper than a stationary car.
+        #
+        # Written via .tmp + mv, the same way the approval offer above is: a bare
+        # redirect TRUNCATES first, so losing power mid-write leaves a zero-byte
+        # file. installed_version() would then hand an empty string to the
+        # version compare, which ver_gt treats as 0.0.0 -- i.e. the downgrade gate
+        # silently off, which is the worst of the three possible outcomes here.
+        if ! { echo "$_ver" > "$VERSION_FILE.tmp" && mv "$VERSION_FILE.tmp" "$VERSION_FILE"; } 2>/dev/null; then
+            rm -f "$VERSION_FILE.tmp" 2>/dev/null || :
+            warn "installed $_ver but COULD NOT RECORD IT in $VERSION_FILE.
+     This board will keep reporting the old version and will reinstall $_ver on
+     the next campaign. Check that /data is mounted and writable: findmnt /data"
+        fi
         report "R1|version|$_ver"
         report "R1|status|updated to $_ver"
         rm -rf "$WORKDIR/dl"
@@ -596,6 +699,7 @@ run_update() {
 log "agent starting — broker $AIO_HOST:$AIO_PORT topic $TOPIC as $CLIENT_ID"
 log "policy: target=$TARGET_TAG allow_downgrade=$ALLOW_DOWNGRADE workdir=$WORKDIR"
 log "url allowlist: ${OTA_URL_PREFIX}*"
+log "version file: $VERSION_FILE"
 log "installed version: $(installed_version)"
 
 # Adafruit IO has no true MQTT retain. Publishing to <feed>/get makes IO

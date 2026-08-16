@@ -14,7 +14,11 @@ SRC_URI = " \
 
 S = "${WORKDIR}/${PN}"
 
-ACKERMANN_VERSION = "1.0.6"
+# Same single counter as IVI_APP_VERSION -- the DESCRIPTION above already says the
+# agent's installed-version record is shared, and this is what enforces it rather
+# than leaving the two numbers to be kept equal by hand. Bump it in the include.
+require conf/include/vpace-ota-version.inc
+ACKERMANN_VERSION = "${VPACE_OTA_VERSION}"
 
 # Depend on the ackermann packages to produce the tarballs
 IMAGE_DEPENDS = "ackermann-description ackermann-bringup ackermann-hardware"

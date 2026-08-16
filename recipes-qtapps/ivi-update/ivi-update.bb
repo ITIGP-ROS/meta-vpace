@@ -11,7 +11,12 @@ SRC_URI = " \
 S = "${WORKDIR}/${PN}"
 
 
-IVI_APP_VERSION = "1.0.6"
+# Not a literal any more. The agent has ONE installed-version counter shared with
+# ackermann-update, and ivi-ota-agent generates its INITIAL_VERSION floor from the
+# same variable -- see conf/include/vpace-ota-version.inc for why they cannot
+# drift apart. Bump it there, not here.
+require conf/include/vpace-ota-version.inc
+IVI_APP_VERSION = "${VPACE_OTA_VERSION}"
 
 # Depend on ivi to produce the tarball
 IMAGE_DEPENDS = "ivi"

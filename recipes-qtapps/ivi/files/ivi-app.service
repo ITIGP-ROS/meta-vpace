@@ -3,6 +3,24 @@ Description=ITI Qt IVI Application
 After=weston.service
 Requires=weston.service
 
+# Best-effort nudge only — NOT load-bearing, and deliberately without a
+# matching After=.
+#
+# This pulls network-online.target into the boot transaction, which makes it
+# somewhat more likely the network is already up by the time weston and the app
+# have finished starting. It does not order this unit against the target, so it
+# does not close the race on its own.
+#
+# Do NOT add After=network-online.target. It would hold the app back until
+# NetworkManager-wait-online finishes or times out (~30s), leaving a blank head
+# unit on precisely the units that have no saved WiFi profile — and WiFi is
+# joined *through* this app, so those are the ones that need it soonest.
+#
+# The real fix is in the app: RosNode watches RTNETLINK and rebuilds its ROS
+# node when an IPv4 address appears, because Fast DDS scans interfaces once per
+# participant and never rescans. See DriveView/inc/interface_monitor.h.
+Wants=network-online.target
+
 [Service]
 Type=simple
 User=weston

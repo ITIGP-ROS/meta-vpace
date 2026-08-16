@@ -50,6 +50,22 @@ ackermann_controller:
     use_stamped_vel: true
     
     # TF
+    #
+    # These name the edge odom -> base_footprint, which ekf_filter_node ALREADY OWNS
+    # (ekf.yaml: world_frame: odom, odom_frame: odom, base_link_frame: base_footprint,
+    # publish_tf defaults true). enable_odom_tf stays false so there is exactly one
+    # publisher of that transform.
+    #
+    # Flipping this to true on its own now does NOTHING: the controller publishes to
+    # ~/tf_odometry, and robot.launch.py no longer remaps that onto /tf. Restoring the
+    # EKF-less fallback -- wheel odometry supplying odom -> base_footprint when
+    # robot_localization is not running -- takes BOTH this flag and that remap.
+    #
+    # Never turn both on while ekf_filter_node is up. Two publishers on one TF edge give a
+    # jittering, non-deterministic transform underneath the whole navigation stack.
+    #
+    # Note this only gates the TRANSFORM. The ~/odometry topic that feeds the EKF
+    # (ekf.yaml odom0) is published regardless.
     base_frame_id: base_footprint
     odom_frame_id: odom
     enable_odom_tf: false

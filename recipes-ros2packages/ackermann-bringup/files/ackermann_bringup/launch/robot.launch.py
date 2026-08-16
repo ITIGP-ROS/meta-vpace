@@ -88,8 +88,19 @@ def generate_launch_description():
         executable='ros2_control_node',
         parameters=[{'robot_description': ackermann_description},
             robot_controllers],
+        # NO REMAP OF ~/tf_odometry ONTO /tf HERE -- ON PURPOSE.
+        #
+        # ekf_filter_node owns odom -> base_footprint (see ekf.yaml: world_frame: odom).
+        # The controller is configured for the SAME edge (controllers.yaml odom_frame_id /
+        # base_frame_id) and is only kept off it by enable_odom_tf: false, so remapping it
+        # onto /tf added a publisher that never published anything.
+        #
+        # That silent third publisher was not harmless: rosbag2 adapts its subscription QoS
+        # to whichever publishers it has discovered when it subscribes, so depending on
+        # discovery order it could match the mute one and reject the two that carry every
+        # actual transform -- recording /tf as ZERO messages while still listing it as a
+        # recorded topic and exiting successfully. Seen in 2 of 5 drive-length recordings.
         remappings=[
-            ('/ackermann_controller/tf_odometry', '/tf'),
             ('/ackermann_controller/reference', '/cmd_vel_stamped'),
         ]
     )

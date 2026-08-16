@@ -1,14 +1,77 @@
+# Ethernet profile for the LiDAR link.
+#
+# This port carries exactly one thing: the Livox Mid-360S at 192.168.1.148, which requires
+# the host to answer from 192.168.1.5. Everything else -- SSH, NTP, DNS, the outside world --
+# goes over WiFi (wlu2u2). Verified on the unit across a reboot on 2026-08-15.
+#
+# ============================================================================
+# THE FOUR THINGS THAT ARE EASY TO GET WRONG
+#
+# 1. address1 MUST BE /32, NEVER /24.
+#
+#    A /24 makes NetworkManager auto-create a 192.168.1.0/24 route at metric 0 on this
+#    interface. That beats the WiFi route at metric 600, captures the developer laptop's own
+#    subnet, and KILLS SSH TO THE BOX -- recoverable only with a serial console or a monitor.
+#    The explicit route1 below is what gives the /32 a path to the sensor.
+#
+# 2. route1_options=src=192.168.1.5 is not decoration.
+#
+#    It pins the source address on packets to the LiDAR. The Livox SDK expects to be talked
+#    to from the host address it was configured with; without this the kernel is free to pick
+#    another source and the sensor ignores us.
+#
+# 3. THERE IS NO /24 ON THIS INTERFACE, AND THERE MUST NEVER BE ONE.
+#
+#    This profile used to also carry address1=10.42.0.50/24 for a dev host that no longer
+#    exists. It was believed harmless -- a connected route on a subnet nobody used. Then the
+#    WiFi AP changed to one handing out 10.42.0.0/24 (NetworkManager's connection-sharing
+#    default), the Jetson got 10.42.0.40 on wlu2u2, and plugging in the LiDAR cable installed
+#
+#        10.42.0.0/24 dev enP8p1s0 scope link src 10.42.0.50 metric 100
+#
+#    against the WiFi's identical route at metric 600. Metric 100 won, so every packet to
+#    10.42.0.x -- including SSH replies to the laptop at 10.42.0.1 -- left via the LiDAR port
+#    and vanished. SSH died the instant the cable went in.
+#
+#    Same mechanism as trap 1, different subnet. ANY /24 here can collide with whatever the
+#    WiFi is on today, and the WiFi is DHCP on a network that has already moved once. Host
+#    routes and /32s only.
+#
+# 4. NO gateway= AND NO dns= HERE. never-default=true enforces it.
+#
+#    This profile used to carry gateway=10.42.0.1 and dns=10.42.0.1. That installed
+#    'default via 10.42.0.1 dev enP8p1s0 metric 100', which beat WiFi at 600 -- and the host
+#    it pointed at no longer exists (100% packet loss, ARP FAILED). Every off-subnet packet
+#    went into a black hole out of the LiDAR port, and name resolution pointed at the same
+#    dead host: NTP, DNS and package fetches all failed silently. Do not add a gateway to
+#    this interface; it is a sensor link, not a route to anywhere.
+#
+# KEEP THE addressN KEYS CONTIGUOUS FROM 1. NetworkManager reads address1, address2, ... and
+# STOPS at the first missing index. Deleting address1 and leaving address2 does not shift it
+# up -- the remaining address is silently dropped and the LiDAR link goes dead with no error.
+# Same rule for routeN.
+#
+# NOTE: the missing LiDAR address is a SILENT failure. The driver logs 'bind failed' and then
+# KEEPS RUNNING, publishing nothing -- which already invalidated two test runs. If /livox/lidar
+# is quiet, check this file before you suspect the sensor.
+#
+# Installed 0600 by nm-config.bb; NetworkManager ignores keyfiles with looser permissions.
+# ============================================================================
+
 [connection]
 id=static-eth
 type=ethernet
 interface-name=enP8p1s0
 autoconnect=true
 
+[ethernet]
+
 [ipv4]
 method=manual
-addresses=10.42.0.50/24
-gateway=10.42.0.1
-dns=10.42.0.1
+address1=192.168.1.5/32
+never-default=true
+route1=192.168.1.148/32,0.0.0.0,100
+route1_options=src=192.168.1.5
 
 [ipv6]
 method=disabled

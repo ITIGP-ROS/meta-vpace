@@ -1,7 +1,22 @@
+# systemd-networkd profile for the ethernet port. NOT INSTALLED -- see the note in
+# orinivi-image.bb: NetworkManager owns this interface and nm-config provides the real
+# profile at /etc/NetworkManager/system-connections/static-eth.nmconnection.
+#
+# Kept only as a fallback for a build without NetworkManager. If you ever add static-eth to
+# IMAGE_INSTALL, remove nm-config in the same change -- two managers on one interface fight.
+#
+# Gateway= and DNS= deliberately absent. They used to point at 10.42.0.1, which no longer
+# exists; the resulting default route beat WiFi and black-holed all off-subnet traffic. This
+# port is a sensor link, not a route to anywhere. See the comment block in
+# ../../nm-config/files/static-eth.nmconnection for the full story and for the LiDAR
+# addressing this file does NOT reproduce.
+
+# The old 10.42.0.50/24 is gone too, and not just because its dev host died: the WiFi AP now
+# hands out 10.42.0.0/24, so that address put a metric-100 route on this port for the very
+# subnet SSH arrives on, and killed the link the moment the cable went in. No /24 here.
+
 [Match]
 Type=ether
 
 [Network]
-Address=10.42.0.50/24
-Gateway=10.42.0.1
-DNS=10.42.0.1
+Address=192.168.1.5/32

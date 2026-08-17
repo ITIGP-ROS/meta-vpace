@@ -48,6 +48,12 @@
  * edge-triggered, so in the steady state they cost nothing, and merging a
  * transition into a periodic tick would delay it by up to a full interval.
  *
+ * THE WIFI ADDRESS IS THE ONE EXCEPTION TO THE LINE FORMAT. It is published as a bare
+ * dotted quad -- "192.168.217.116" -- and not as ID/CODE/SEV/TS/AUX, because it is
+ * meant to be read by a human off the Adafruit feed rather than decoded by the
+ * dashboard. Anything parsing this feed strictly must tolerate a line that does not
+ * match the five-field shape.
+ *
  * Build:  ${CXX} -std=c++17 -o jetson_status_agent jetson_status_agent.cpp
  * Usage:  jetson_status_agent --probe          what can this board read?
  *         jetson_status_agent --dry-run        print lines, publish nothing
@@ -67,7 +73,11 @@
 #include <csignal>
 #include <getopt.h>
 #include <glob.h>
+#include <ifaddrs.h>
+#include <net/if.h>
+#include <netinet/in.h>
 #include <spawn.h>
+#include <sys/stat.h>
 #include <sys/statvfs.h>
 #include <time.h>
 #include <unistd.h>
@@ -89,6 +99,10 @@ enum Code : uint8_t {
     CODE_SYS_SUMMARY = 0x63,
     // 0x64-0x6F are free. Adding one means a name and an AUX decoder on the
     // dashboard side too, so say which code before you use it.
+    //
+    // NOTE: the WiFi address does NOT take a code. It is published as a bare dotted
+    // quad -- see publish_events(). It is the one message on this feed that is not in
+    // the five-field format.
 };
 
 enum Sev : int { SEV_INFO = 0, SEV_WARN = 1, SEV_ERROR = 2, SEV_FATAL = 3 };
@@ -330,6 +344,66 @@ static double soc_temp_c()
     return best;
 }
 
+// Is this interface a WiFi radio? Asked of sysfs rather than inferred from the name,
+// because the NAME IS NOT STABLE. This board's radio was wlu2u2 while it was an MT7601U
+// USB dongle and became wlP1p1s0 when the Intel 8265 M.2 card replaced it -- a hardcoded
+// name would have started reporting "no address" at the swap, and reported it as a WiFi
+// outage rather than as its own bug.
+//
+// Both markers are checked because they are set by different layers: `wireless` is the
+// cfg80211 attribute group, `phy80211` the link to the underlying mac80211 radio. Every
+// driver in this image sets both; a driver that sets only one still answers here.
+static bool is_wireless(const char *ifname)
+{
+    const std::string base = std::string("/sys/class/net/") + ifname;
+    struct stat st {};
+    // lstat, not stat: phy80211 is a symlink, and lstat answers for the link itself
+    // rather than following it to a target that may not resolve.
+    if (lstat((base + "/wireless").c_str(), &st) == 0) return true;
+    if (lstat((base + "/phy80211").c_str(), &st) == 0) return true;
+    return false;
+}
+
+// The IPv4 address of the connected WiFi interface in HOST byte order, 0 when there is
+// none. The name of the interface it came from is returned too, so --probe can say which
+// radio answered rather than just printing a number.
+//
+// IFF_RUNNING and not merely IFF_UP: an administratively-up radio that has not associated
+// still carries its last address in some configurations, and publishing that would report
+// a link the vehicle does not actually have.
+//
+// getifaddrs rather than parsing `ip addr`: it is in glibc, so this stays a single
+// translation unit with nothing to link -- the same reason this agent spawns
+// mosquitto_pub instead of taking an MQTT library.
+static uint32_t wifi_ipv4(std::string &ifname_out)
+{
+    ifaddrs *list = nullptr;
+    if (getifaddrs(&list) != 0) return 0;
+
+    uint32_t found = 0;
+    for (ifaddrs *p = list; p; p = p->ifa_next) {
+        if (!p->ifa_addr || p->ifa_addr->sa_family != AF_INET) continue;
+        if (p->ifa_flags & IFF_LOOPBACK) continue;
+        if (!(p->ifa_flags & IFF_UP) || !(p->ifa_flags & IFF_RUNNING)) continue;
+        if (!is_wireless(p->ifa_name)) continue;
+        found = ntohl(((const sockaddr_in *)p->ifa_addr)->sin_addr.s_addr);
+        ifname_out = p->ifa_name;
+        break;
+    }
+    freeifaddrs(list);
+    return found;
+}
+
+// Always a dotted quad, 0 included -- this string IS the published payload, so it does
+// not get to be "n/a". --probe substitutes its own placeholder for display.
+static std::string ipv4_str(uint32_t ip)
+{
+    char buf[16];
+    std::snprintf(buf, sizeof(buf), "%u.%u.%u.%u",
+                  (ip >> 24) & 0xFF, (ip >> 16) & 0xFF, (ip >> 8) & 0xFF, ip & 0xFF);
+    return buf;
+}
+
 // ------------------------------------------------------------------- the packing
 
 static uint32_t pack_sys_health(int up_min, double mem, double cpu)
@@ -430,15 +504,12 @@ static bool g_dry_run = false;
 // than something derived from `code` so the width stays visible at the call site --
 // the width IS the wire contract, and a reader of publish_periodic should not have
 // to come in here to find out how wide the field they are looking at is.
-static void publish(const Config &cfg, uint8_t code, int sev, uint64_t aux,
-                    int aux_digits = 8)
+// Sends one payload verbatim. Split out of publish() so the WiFi address can go to the
+// same feed without being wrapped in the five-field line -- everything about the
+// transport (topic, credentials, the fork-and-forget) is identical, only the shape of
+// the text differs.
+static void publish_payload(const Config &cfg, const char *payload)
 {
-    char payload[128];
-    std::snprintf(payload, sizeof(payload),
-                  "ID:%02X | CODE:%02X | SEV:%d | TS:%llu | AUX:%0*llX",
-                  ECU_ID, code, sev, (unsigned long long)mono_ms(),
-                  aux_digits, (unsigned long long)aux);
-
     std::printf("%s\n", payload);
     std::fflush(stdout);
     if (g_dry_run) return;
@@ -452,13 +523,24 @@ static void publish(const Config &cfg, uint8_t code, int sev, uint64_t aux,
         (char *)"-u", (char *)cfg.user.c_str(),
         (char *)"-P", (char *)cfg.key.c_str(),
         (char *)"-t", (char *)topic.c_str(),
-        (char *)"-m", payload,
+        (char *)"-m", (char *)payload,
         nullptr
     };
 
     pid_t pid;
     if (posix_spawnp(&pid, "mosquitto_pub", nullptr, nullptr, argv, environ) != 0)
         std::fprintf(stderr, "[status] could not spawn mosquitto_pub\n");
+}
+
+static void publish(const Config &cfg, uint8_t code, int sev, uint64_t aux,
+                    int aux_digits = 8)
+{
+    char payload[128];
+    std::snprintf(payload, sizeof(payload),
+                  "ID:%02X | CODE:%02X | SEV:%d | TS:%llu | AUX:%0*llX",
+                  ECU_ID, code, sev, (unsigned long long)mono_ms(),
+                  aux_digits, (unsigned long long)aux);
+    publish_payload(cfg, payload);
 }
 
 // ---------------------------------------------------------------------- the loop
@@ -472,6 +554,8 @@ struct Sample {
     double   temp     = -1;
     double   disk_used = -1;
     uint32_t disk_free_mib = 0;
+    uint32_t wifi_ip  = 0;         // host byte order, 0 = not connected
+    std::string wifi_if;           // which radio it came from, for --probe
 };
 
 static Sample take_sample()
@@ -485,6 +569,7 @@ static Sample take_sample()
     s.gpu_mem = gpu_mem_pct();
     s.temp    = soc_temp_c();
     disk_usage(s.disk_used, s.disk_free_mib);
+    s.wifi_ip = wifi_ipv4(s.wifi_if);
     return s;
 }
 
@@ -499,6 +584,12 @@ struct Thresholds {
 struct EventState {
     int thermal = -1;      // -1 unknown, 0 ok, 1 warn, 2 crit
     int disk    = -1;      // -1 unknown, 0 ok, 1 low
+    // The IP needs its own "nothing said yet" flag rather than reusing ip == 0, because
+    // 0 is also the legitimate value for "no WiFi". Without it a board that boots with
+    // no association never announces that fact -- the state it is in matches the state
+    // it is initialised to, so there is no transition to notice.
+    uint32_t ip       = 0;
+    bool     ip_known = false;
 };
 
 // One point per tick by default. `split` sends the old two-message pair instead --
@@ -540,6 +631,27 @@ static void publish_events(const Config &cfg, const Sample &s,
             st.disk = level;
         }
     }
+
+    // Edge-triggered for the same reason as the two above, and for one more: the address
+    // is CONSTANT for days at a time. Folding it into the tick would spend a point a
+    // minute, forever, to repeat a number that has not changed -- out of the 30 a minute
+    // this account shares with the ESP32 and the Cluster, and against an agent whose
+    // steady state was deliberately engineered down to one point a minute by 0x63.
+    //
+    // The moments it DOES change are exactly the moments it is worth a point: the board
+    // came up, took a new DHCP lease, moved to another AP, or dropped off WiFi entirely.
+    // That last one still publishes -- AUX:00000000 at SEV_WARN -- because "this board
+    // has no address" is the single most useful thing the feed can say about a vehicle
+    // that has gone quiet, and it is the one message that cannot be sent late.
+    if (!st.ip_known || s.wifi_ip != st.ip) {
+        // Bare dotted quad, no ID/CODE/SEV/TS wrapper -- this one is for reading off the
+        // Adafruit feed by eye. 0.0.0.0 is what "no WiFi address" looks like; it is sent
+        // for completeness rather than for delivery, since publishing needs the very
+        // network whose loss it is reporting and mosquitto_pub will simply fail.
+        publish_payload(cfg, ipv4_str(s.wifi_ip).c_str());
+        st.ip       = s.wifi_ip;
+        st.ip_known = true;
+    }
 }
 
 static void probe()
@@ -565,11 +677,20 @@ static void probe()
                 show(s.gpu_mem, " %").c_str());
     std::printf("  soc temp    %s      (hottest CPU/GPU/SOC/TJ thermal zone)\n",
                 show(s.temp, " C").c_str());
+    std::printf("  wifi ip     %-10s (%s)\n",
+                s.wifi_ip ? ipv4_str(s.wifi_ip).c_str() : "n/a",
+                s.wifi_if.empty() ? "no associated wireless interface" : s.wifi_if.c_str());
     Config cfg;
     g_dry_run = true;
 
     std::printf("\n--- the line this would publish (one point) ---\n");
     publish_periodic(cfg, s, false);
+
+    // Edge-triggered, so it is NOT part of the tick above and would not appear here at
+    // all. Printed separately because "what can this board read" is the question --probe
+    // answers, and an address the agent will announce on the next change is part of that.
+    std::printf("\n--- wifi address, sent as plain text only when it changes ---\n");
+    publish_payload(cfg, ipv4_str(s.wifi_ip).c_str());
 
     // Printed side by side on purpose: the two legacy words ARE the two halves of
     // the line above, so this is the check that says so at a glance. If they ever

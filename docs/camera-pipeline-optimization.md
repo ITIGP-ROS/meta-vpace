@@ -100,6 +100,46 @@ GPU at 1173 MHz instead of its parked 306 MHz costs about 2.8 W, so that inferen
 never starts from a cold clock. `nvhost_podgov` had kept the GPU at minimum for 99.9%
 of uptime, and its 25 ms polling cannot react inside a single inference.
 
+## Autostart
+
+The pipeline no longer has to be launched by hand. `camera-sign-detect.service`
+(shipped by `recipes-ros2packages/camera-sign-detect-bringup/`) starts when the camera is
+plugged in and stops when it is pulled out — at boot or on a later replug, with no
+`[Install]` section and nothing enabled at boot.
+
+```
+udev sees 046d:094c ──► SYMLINK=/dev/camera-front ──► dev-camera\x2dfront.device
+       (99-vpace-camera.rules)   TAG+="systemd"            │           │
+                                                 SYSTEMD_WANTS      BindsTo
+                                                       │               │
+                                                     START            STOP
+                                                       ▼               ▼
+                                            camera-sign-detect.service
+                                                       │
+                                          Requires=systemd-networkd-wait-online@can0
+```
+
+The CAN dependency is not decoration. `YoloClassCanNode` throws if `can0` cannot be
+opened, and it is a *composable* node — `LoadComposableNodes` logs that and launch keeps
+going, so the container stays up and the unit reports **active** while detections publish
+to `/yolos_detector/detections` and never reach the bus. Ordering after
+`systemd-networkd-wait-online@can0.service` is what prevents it; `can0.network` carries
+`RequiredForOnline=carrier` so that instance can reach "configured" at all (a CAN link
+never gets an address, so it never reaches wait-online's default minimum of `degraded`).
+
+**Running it by hand:** stop the service first.
+
+```bash
+systemctl stop camera-sign-detect
+```
+
+Otherwise `ros2 launch` gives a second container and duplicate node names, and the two
+fight over the camera — which looks like the pipeline being broken rather than doubled.
+
+```bash
+journalctl -u camera-sign-detect -b -f
+```
+
 ## Verifying after a rebuild
 
 ```bash

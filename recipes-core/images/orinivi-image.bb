@@ -77,7 +77,32 @@ IMAGE_INSTALL:append = " jetson-status-agent"
 IMAGE_INSTALL:append = " networkmanager-nmcli "
 
 #  WiFi kernel module and firmware
+#
+# Two radios are supported: the MT7601U USB dongle and the Intel 8265 M.2 card. Both sets
+# of modules are installed unconditionally so the image boots with WiFi whichever one is
+# fitted -- the unused driver costs a probe that finds no device.
+#
+# The kernel fragments (linux-jammy-nvidia-tegra_5.15.bbappend) already set CONFIG_IWLWIFI=m
+# and CONFIG_IWLMVM=m, so the modules were being BUILT and packaged all along; they simply
+# were not in IMAGE_INSTALL, which left the 8265 sitting on the PCI bus with driver=NONE and
+# no wireless interface at all. A kernel fragment enables a build, it does not install it.
 IMAGE_INSTALL:append = " kernel-module-mt7601u linux-firmware-mt7601u "
+IMAGE_INSTALL:append = " kernel-module-iwlwifi kernel-module-iwlmvm linux-firmware-iwlwifi-8265 "
+
+# Bluetooth for the Intel 8265. The BT half of the card is a USB function (8087:0a2b), not
+# PCIe, so it needs the USB HCI transport rather than anything on the PCI side.
+#
+# ALL FOUR MODULES ARE REQUIRED -- btrtl and btbcm are NOT optional here despite the card
+# being Intel. btusb is compiled with CONFIG_BT_HCIBTUSB_RTL=y and CONFIG_BT_HCIBTUSB_BCM=y,
+# so it references btrtl_setup_realtek/btrtl_shutdown_realtek and the btbcm symbols
+# unconditionally at load time. Ship btusb without btrtl and modprobe fails outright with
+# "Unknown symbol btrtl_setup_realtek" -- the Intel radio never appears, and the error names
+# a Realtek symbol, which sends you looking in the wrong place entirely.
+#
+# ibt-12-16 is the correct firmware for the 8265 specifically (the .sfi is the operational
+# image, the .ddc the tuning parameters); the 8260 takes ibt-11-5 and the 7265 ibt-hw-37-8.
+IMAGE_INSTALL:append = " kernel-module-btusb kernel-module-btintel kernel-module-btrtl kernel-module-btbcm "
+IMAGE_INSTALL:append = " linux-firmware-ibt-12-16 "
 # CAN kernel modules
 IMAGE_INSTALL:append = " can-utils kernel-module-can kernel-module-mttcan kernel-module-can-raw "
 # USB camera kernel module

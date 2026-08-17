@@ -1,10 +1,11 @@
 SUMMARY = "Jetson status agent: publishes CPU/GPU/memory/thermal health to the log feed"
 DESCRIPTION = "Samples /proc and the Tegra sysfs nodes and publishes this board's \
 health onto the vehicle's Adafruit IO log feed (<user>/feeds/logs) as ID:A2, in the \
-same five-field line the ESP32 and the Cluster guest use. Two data points a minute \
-(CODE:58 SYS HEALTH and CODE:60 GPU LOAD), plus edge-triggered thermal and disk \
-events. Credentials come from ivi-ota-agent's /etc/ivi-ota/agent.conf; there is no \
-second copy of the key."
+same five-field line the ESP32 and the Cluster guest use. One data point a minute \
+(CODE:63 SYS SUMMARY, which carries the legacy CODE:58 and CODE:60 words as its two \
+halves; --split sends the old pair instead), plus edge-triggered thermal, disk and \
+WiFi-address events. Credentials come from ivi-ota-agent's /etc/ivi-ota/agent.conf; \
+there is no second copy of the key."
 LICENSE = "CLOSED"
 LIC_FILES_CHKSUM = ""
 

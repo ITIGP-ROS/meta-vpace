@@ -3,6 +3,7 @@ LICENSE = "CLOSED"
 
 SRC_URI = " \
     file://10-unmanaged-interfaces.conf \
+    file://10-eth-unmanaged.network \
     file://20-keyfile-path.conf \
     file://nm-state-on-data.conf \
     file://static-eth.nmconnection \
@@ -26,6 +27,12 @@ do_install() {
     install -d ${D}${sysconfdir}/NetworkManager/conf.d
     install -m 0644 ${WORKDIR}/10-unmanaged-interfaces.conf ${D}${sysconfdir}/NetworkManager/conf.d/
     install -m 0644 ${WORKDIR}/20-keyfile-path.conf ${D}${sysconfdir}/NetworkManager/conf.d/
+
+    # The other half of the division of labour: 10-unmanaged-interfaces.conf keeps
+    # NetworkManager off can0, this keeps systemd-networkd off ethernet. Goes in
+    # networkd's directory, not NetworkManager's -- it is a networkd config file.
+    install -d ${D}${systemd_unitdir}/network
+    install -m 0644 ${WORKDIR}/10-eth-unmanaged.network ${D}${systemd_unitdir}/network/
 
     # static-eth goes in the READ-ONLY profile directory, not /etc.
     #
@@ -55,4 +62,5 @@ FILES:${PN} += " \
     ${sysconfdir}/NetworkManager/conf.d/*.conf \
     ${nonarch_libdir}/NetworkManager/system-connections/*.nmconnection \
     ${systemd_system_unitdir}/NetworkManager.service.d/*.conf \
+    ${systemd_unitdir}/network/10-eth-unmanaged.network \
 "

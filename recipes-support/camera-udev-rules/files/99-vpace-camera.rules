@@ -12,4 +12,16 @@
 #
 # ATTR{index}=="0" picks the capture node; index 1 is the metadata node
 # (V4L2_CAP_META_CAPTURE), which cannot stream video.
-SUBSYSTEM=="video4linux", ATTRS{idVendor}=="046d", ATTRS{idProduct}=="094c", ATTR{index}=="0", SYMLINK+="camera-front"
+#
+# TAG+="systemd" does two jobs. It makes systemd create a .device unit for this camera
+# AND alias that unit to every entry in DEVLINKS -- which is what gives
+# dev-camera\x2dfront.device its name, the name camera-sign-detect.service binds to. The
+# BindsTo= there is what stops the pipeline on unplug, so dropping this tag would leave
+# the detector running against a device that no longer exists.
+#
+# SYSTEMD_WANTS is the start edge, and it covers boot as well as a later replug:
+# systemd-udev-trigger.service replays add events for devices that are already present.
+# The unit itself has no [Install] section, so this rule is the only thing that ever
+# starts it.
+SUBSYSTEM=="video4linux", ATTRS{idVendor}=="046d", ATTRS{idProduct}=="094c", ATTR{index}=="0", \
+    SYMLINK+="camera-front", TAG+="systemd", ENV{SYSTEMD_WANTS}="camera-sign-detect.service"

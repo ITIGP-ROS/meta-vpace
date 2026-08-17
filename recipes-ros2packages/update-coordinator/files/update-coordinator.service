@@ -1,7 +1,19 @@
 [Unit]
 Description=Update Coordinator — SecOC CAN-based ECU firmware update orchestration
-After=network.target can-config.service
-Wants=can-config.service
+After=network.target
+
+# can-config ships ONLY can0.network for systemd-networkd -- there has never been a
+# can-config.service. The reference that used to be here therefore named a unit that does
+# not exist, which systemd ignores silently, so this ordering was a no-op. The stock
+# per-interface wait-online instance is the real "can0 is configured" unit; can0.network
+# declares RequiredForOnline=carrier so it can actually reach that state.
+#
+# Wants=, not Requires=: this restores the ORDERING without changing the coordinator's
+# behaviour, which has always been to start even when CAN is missing. Its one hard gate
+# stays the /data check below. (camera-sign-detect.service uses Requires= instead,
+# because its CAN failure mode is silent rather than loud.)
+Wants=systemd-networkd-wait-online@can0.service
+After=systemd-networkd-wait-online@can0.service
 
 # The SecOC freshness counters live on /data (see state_dir below), so this
 # node cannot start before that partition is up.

@@ -1,0 +1,73 @@
+[Unit]
+Description=Traffic sign detection pipeline (camera + YOLO + CAN)
+Documentation=file:/usr/share/camera_sign_detect_bringup/launch/yolo_auto_launch.py
+
+# Start and stop with the camera.
+#
+# BindsTo the SYMLINK's device unit, NOT dev-videoN: /dev/videoN is not stable on this
+# hardware (the Brio has been seen at video0, video1 and video2 across replugs), which is
+# the whole reason 99-vpace-camera.rules exists. That rule's SYMLINK+="camera-front"
+# becomes an alias on the device unit, so the name below is stable and can be written
+# into a packaged unit file.
+#
+# BindsTo is also what stops the pipeline on unplug. ivi-mtp-mount needs a
+# `systemctl stop` from a udev RUN+= for the same job only because its instance name
+# derives from the device and cannot be known in advance; here it can, so the
+# systemd-native form works and no RUN+= is needed.
+BindsTo=dev-camera\x2dfront.device
+After=dev-camera\x2dfront.device
+
+# can0 must be UP, not merely present.
+#
+# YoloClassCanNode throws in its constructor when the interface cannot be opened. It is a
+# COMPOSABLE node, so LoadComposableNodes logs the failure and launch carries on: the
+# container stays up, this unit reports active, and detections keep publishing on
+# /yolos_detector/detections while never reaching the vehicle bus. That silent
+# half-loaded state is exactly what a udev trigger firing before systemd-networkd has
+# configured can0 produces.
+#
+# systemd-networkd-wait-online@.service is stock systemd (Type=oneshot,
+# RemainAfterExit=yes), so this needs no unit of our own and later replugs do not wait
+# again. It only reaches "configured" for can0 because can0.network declares
+# RequiredForOnline=carrier -- a CAN link never gets an address and so never reaches
+# wait-online's default minimum of "degraded".
+#
+# Requires=, not Wants=: a can0 that never comes up must fail this unit loudly rather
+# than leave it running in the silent state described above.
+Requires=systemd-networkd-wait-online@can0.service
+After=systemd-networkd-wait-online@can0.service
+
+# Startup loads a model onto the GPU, so a crash loop is expensive. After 3 failures in
+# 5 minutes, stay down and wait for a replug rather than thrash.
+#
+# These are [Unit] keys, NOT [Service]. They lived in [Service] until systemd 229 and are
+# still widely copied that way; systemd 255 parses the file without complaint and simply
+# ignores them there, so the limit silently does not apply. `systemd-analyze verify` on
+# this file is what catches it.
+StartLimitIntervalSec=300
+StartLimitBurst=3
+
+[Service]
+Type=simple
+# rclpy wants a writable HOME for its log directory, and the launch file shells out to
+# `ros2 lifecycle set` to configure and activate the detector. Same reason
+# update-coordinator.service sets it.
+Environment=HOME=/root
+
+ExecStart=/bin/sh -c '. /opt/ros/humble/setup.bash && exec ros2 launch camera_sign_detect_bringup yolo_auto_launch.py'
+
+# ros2 launch tears its composable container down cleanly on SIGINT. The default SIGTERM
+# leaves the nodes to be killed by the cgroup sweep instead.
+KillSignal=SIGINT
+TimeoutStopSec=20
+
+Restart=on-failure
+RestartSec=5
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=camera-sign-detect
+
+# No [Install] section on purpose. This unit is started by 99-vpace-camera.rules when the
+# camera appears; with no camera attached there is no device for v4l2_camera to open, so
+# it must never be pulled in at boot.

@@ -7,3 +7,31 @@ RestartSec=100ms
 
 [Link]
 ActivationPolicy=up
+
+# Makes systemd-networkd-wait-online@can0.service usable as an ordering dependency, so
+# units that need a working bus can say so declaratively instead of polling `ip link`.
+# camera-sign-detect.service Requires= it (its CAN node throws if can0 is not open, and
+# because that node is composable the failure is silent); update-coordinator.service
+# Wants= it.
+#
+# The value matters. wait-online defaults to a minimum operational state of "degraded",
+# which implies an address -- a CAN link never gets one and tops out at "carrier", so
+# without this line the instance would hang until its timeout and then fail.
+#
+# This does NOT newly enlist can0 in network-online.target -- a managed link is required
+# for online by default, so can0 was already counted and already failing it. Measured on
+# the board 2026-08-17 before this line existed:
+#
+#     networkctl status can0  ->  State: carrier (configured)
+#                                 Online state: offline
+#                                 Required For Online: yes
+#
+#     systemd-networkd-wait-online -i can0            -> timeout, exit 1  (8.2 s)
+#     systemd-networkd-wait-online -i can0:carrier    -> exit 0           (0.005 s)
+#
+# So this line strictly REMOVES a blocker. It does not fix
+# systemd-networkd-wait-online.service, which still times out at the full 2 min because
+# stock 80-wired.network also claims enP8p1s0 (Required For Online: yes, no-carrier
+# whenever no cable is attached). That is a separate, pre-existing issue -- see
+# `systemd-analyze blame`.
+RequiredForOnline=carrier

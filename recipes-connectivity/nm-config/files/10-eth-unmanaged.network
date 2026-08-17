@@ -1,0 +1,42 @@
+# Keep systemd-networkd off the ethernet port. NetworkManager owns it.
+#
+# This is the mirror image of 10-unmanaged-interfaces.conf, which tells NetworkManager to
+# keep off can0. That half existed; this half did not, so BOTH stacks were claiming
+# enP8p1s0 -- stock /usr/lib/systemd/network/80-wired.network matches Type=ether and runs
+# DHCP=yes on it, against the static 192.168.1.5/32 that static-eth.nmconnection assigns
+# for the LiDAR.
+#
+# TWO THINGS THIS FIXES
+#
+# 1. TWO MINUTES OF BOOT, EVERY BOOT. Measured on the unit 2026-08-17:
+#
+#        systemd-analyze blame  ->  2min 257ms systemd-networkd-wait-online.service
+#        systemctl is-failed    ->  failed
+#
+#    A link networkd manages is Required For Online by default. With no cable in the LiDAR
+#    port enP8p1s0 sits at no-carrier (configuring) forever, so wait-online burned its full
+#    120 s timeout and then failed. It was the single largest item in `systemd-analyze
+#    blame`. (can0 was the other blocker, for a different reason -- see can0.network.)
+#
+# 2. A LATENT SSH-KILLER. Read the trap list at the top of static-eth.nmconnection: a /24
+#    or a default route on this interface beats WiFi on metric and takes SSH to the box
+#    with it, recoverable only over serial. A DHCP client that networkd was free to run
+#    here could install exactly that. It has not bitten yet only because the Livox is a
+#    sensor, not a DHCP server, so the lease request goes unanswered -- i.e. we are relying
+#    on there being no DHCP server on that cable. Plug this port into a real network once
+#    and that stops being true.
+#
+# Unmanaged=yes rather than RequiredForOnline=no: the latter would fix the boot time alone
+# and leave networkd still configuring an interface NetworkManager owns. Unmanaged links
+# are ignored by wait-online too, so it covers both. This is how wlu2u2 already behaves --
+# nothing matches it, so networkd reports it unmanaged and leaves it to NM.
+#
+# The 10- prefix matters. networkd applies the FIRST matching .network in lexicographic
+# order across all its directories, so this has to sort ahead of 80-wired.network.
+
+[Match]
+Type=ether
+Name=!veth*
+
+[Link]
+Unmanaged=yes

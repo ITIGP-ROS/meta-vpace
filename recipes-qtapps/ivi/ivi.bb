@@ -102,6 +102,12 @@ RDEPENDS:${PN} += " \
 RDEPENDS:${PN} += " vosk "
 
 # --- Audio / Bluetooth  ---
+# module-loopback is required for phone audio and is not pulled in by any of the
+# bluez5 packages. A phone is an A2DP *source*, so pulseaudio exposes it as
+# bluez_source.<MAC>.a2dp_source; module-bluetooth-policy routes that to the
+# speakers by loading module-loopback. Without it on disk, policy fails and falls
+# back to setting the card profile to "off" — the phone pairs, AVRCP metadata and
+# transport controls all work, and there is no sound.
 RDEPENDS:${PN} += " \
     pulseaudio \
     pulseaudio-server \
@@ -111,6 +117,7 @@ RDEPENDS:${PN} += " \
     pulseaudio-module-bluetooth-policy \
     pulseaudio-module-bluez5-device \
     pulseaudio-module-bluez5-discover \
+    pulseaudio-module-loopback \
     bluez5 \
 "
 

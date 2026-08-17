@@ -5,8 +5,10 @@ LICENSE = "CLOSED"
 inherit ros_distro_humble
 inherit ros_ament_cmake
 
-SRC_URI = "file://ackermann_bringup"
-S = "${WORKDIR}/ackermann_bringup"
+SRC_URI = "git://github.com/ITIGP-ROS/ros2_ws_gp.git;protocol=https;branch=main"
+SRCREV = "87cb2a9d5647cf11dc5e7cf77e39491b780013ba"
+
+S = "${WORKDIR}/git/src/ackermann_bringup"
 
 ROS_BUILD_DEPENDS = " \
     ament-cmake-native \

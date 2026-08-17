@@ -104,6 +104,14 @@ PACKAGECONFIG:append:pn-qtmultimedia = " gstreamer alsa pulseaudio "
 PACKAGECONFIG:append:pn-pulseaudio   = " systemd "
 
 
+# --- Timestamp the build for traceability ---
+IMAGE_POSTPROCESS_COMMAND += "write_vpace_build; "
+write_vpace_build() {
+    echo "${METADATA_REVISION} ${DATE}" > ${IMAGE_ROOTFS}/etc/vpace-build
+}
+
+
+
 ## ---- ROS2 -TESTING ONLY ---
 IMAGE_INSTALL:append = " \
     rosbag2 \

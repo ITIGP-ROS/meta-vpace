@@ -109,6 +109,9 @@ IMAGE_INSTALL:append = " can-utils kernel-module-can kernel-module-mttcan kernel
 IMAGE_INSTALL:append = " kernel-module-uvcvideo "
 # Stable /dev/camera-front symlink (the Brio moves between /dev/videoN across replugs)
 IMAGE_INSTALL:append = " camera-udev-rules "
+# Disable the Tegra Security Engine crypto driver -- it oopses and the CCPLEX
+# watchdog then resets the board. See recipes-support/tegra-se-blacklist/.
+IMAGE_INSTALL:append = " tegra-se-blacklist "
 # Boot clock policy: runs jetson_clocks so the GPU does not sit parked at 306 MHz
 # (pulls in tegra-tools-jetson-clocks via RDEPENDS; listed explicitly for visibility)
 IMAGE_INSTALL:append = " gpu-clock-policy tegra-tools-jetson-clocks "

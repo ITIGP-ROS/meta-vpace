@@ -6,7 +6,7 @@ inherit ros_distro_humble
 inherit ros_ament_cmake
 
 SRC_URI = "git://github.com/ITIGP-ROS/ros2_ws_gp.git;protocol=https;branch=main"
-SRCREV = "63167756513c23e323d7a6e0ec220fe8f2a704d6"
+SRCREV = "e4e47a00926bd99b107db5a65eb91d77d1465f21"
 
 S = "${WORKDIR}/git/src/ackermann_description"
 

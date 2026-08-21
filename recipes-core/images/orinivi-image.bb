@@ -69,6 +69,9 @@ IMAGE_INSTALL:append = " \
     kernel-module-hid-multitouch \
     "
 
+# JoySticks support
+IMAGE_INSTALL:append = " kernel-module-xpad kernel-module-joydev "
+
 # --- OTA & Telemetry ---
 IMAGE_INSTALL:append = " ivi-ota-agent"
 IMAGE_INSTALL:append = " jetson-status-agent"

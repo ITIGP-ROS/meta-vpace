@@ -1,0 +1,42 @@
+From: V-PACE <yocto@vpace>
+Subject: [PATCH] ackermann_steering_controller: pass steering and traction track separately
+
+configure_odometry() calls the single-track set_wheel_params() overload
+with whichever track belongs to the non-steered (traction) axle, so every
+steering-angle calculation inside SteeringOdometry ends up using the
+traction axle's track instead of the steering axle's. See the companion
+patch to steering_controllers_library, which splits SteeringOdometry's
+internal wheel_track_ into wheel_track_ (steering) and
+wheel_track_traction_ (traction) and adds a 4-arg set_wheel_params()
+overload -- this patch is the one call site that needs to use it.
+
+wheel_radius stays picked from the traction (driven) axle exactly as
+before; only the track argument changes to supply both tracks, in
+(steering, traction) order.
+
+Verified against ackermann_steering_controller 2.52.1-1 (release/humble),
+ros2-gbp/ros2_controllers-release @ 3d20a0f83e63ae93479fb7b3c55dfd4a1d72a409.
+
+diff --git a/src/ackermann_steering_controller.cpp b/src/ackermann_steering_controller.cpp
+--- a/src/ackermann_steering_controller.cpp
++++ b/src/ackermann_steering_controller.cpp
+@@ -37,13 +37,17 @@
+   const double rear_wheel_track = ackermann_params_.rear_wheel_track;
+   const double wheelbase = ackermann_params_.wheelbase;
+
++  // The steering-axle track (kingpin spacing) and the traction-axle track (driven-wheel
++  // spacing) are generally different -- pass both to the odometry so it applies the steering
++  // track to the steer-angle geometry and the traction track to the driven-wheel differential
++  // speed, instead of a single track for both.
+   if (params_.front_steering)
+   {
+-    odometry_.set_wheel_params(rear_wheels_radius, wheelbase, rear_wheel_track);
++    odometry_.set_wheel_params(rear_wheels_radius, wheelbase, front_wheel_track, rear_wheel_track);
+   }
+   else
+   {
+-    odometry_.set_wheel_params(front_wheels_radius, wheelbase, front_wheel_track);
++    odometry_.set_wheel_params(front_wheels_radius, wheelbase, rear_wheel_track, front_wheel_track);
+   }
+
+   odometry_.set_odometry_type(steering_odometry::ACKERMANN_CONFIG);

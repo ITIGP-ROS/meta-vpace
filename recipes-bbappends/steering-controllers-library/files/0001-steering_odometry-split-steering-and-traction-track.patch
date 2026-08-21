@@ -1,0 +1,165 @@
+From: V-PACE <yocto@vpace>
+Subject: [PATCH] steering_odometry: split steering-axle track from traction-axle track
+
+SteeringOdometry keeps a single wheel_track_ and uses it for two physically
+different quantities:
+
+  - the driven (traction) axle's differential-speed geometry
+    (get_linear_velocity_double_traction_axle(), and the Wr/Wl traction
+    commands in get_commands() for TRICYCLE_CONFIG/ACKERMANN_CONFIG), and
+
+  - the steered axle's angle geometry: converting a single "bicycle" steer
+    angle into the two individual wheel angles and back
+    (update_from_velocity()'s right/left steer_pos_est, and the
+    alpha_r/alpha_l split in get_commands() for ACKERMANN_CONFIG).
+
+For the second use, the correct track is the spacing between the two
+steered kingpins -- deriving the standard Ackermann relation
+tan(delta) = L / (R -+ T/2) for the individual wheel gives exactly the code
+already there, but only if T is the steered axle's own track. The traction
+axle's track has no part in that geometry.
+
+ackermann_steering_controller::configure_odometry() only ever calls
+set_wheel_params() with one track (front_wheel_track when
+front_steering=false, else rear_wheel_track), so today every steering-angle
+calculation silently uses the *traction* axle's track instead of the
+*steering* axle's. This is exact only when front_wheel_track ==
+rear_wheel_track, and grows with commanded steering angle otherwise
+(confirmed against measured hardware: a vehicle with front_wheel_track
+0.12 m and rear_wheel_track 0.18179 m showed a real average-steering-angle
+readout that only matches the existing rear_wheel_track-based formula, off
+by 1.3e-3 rad from the geometrically-correct front-track formula at a 0.25
+rad commanded angle).
+
+This is already fixed upstream on the kilted branch by splitting the
+odometry into wheel_track_steering_/wheel_track_traction_ (as part of the
+larger SteeringOdometry -> SteeringKinematics rework). That rework depends
+on newer hardware_interface handle APIs (LoanedStateInterface::
+get_optional()) not present in Humble, so it cannot be cherry-picked as-is.
+This patch backports just the track-width split, keeping Humble's existing
+class/API surface (LoanedStateInterface::get_value(), no
+steering_kinematics rename):
+
+  - adds wheel_track_traction_ alongside the existing wheel_track_ (which
+    now means "steering track"),
+  - adds a 4-arg set_wheel_params(wheel_radius, wheelbase,
+    wheel_track_steering, wheel_track_traction) overload; the existing
+    3-arg overload sets both to the same value, so bicycle/tricycle
+    single-track callers are unaffected,
+  - repoints the three traction differential-speed call sites at
+    wheel_track_traction_, leaving the steer-angle formulas on
+    wheel_track_ (steering track) untouched.
+
+See the companion patch to ackermann_steering_controller for the call-site
+change that actually passes both tracks.
+
+Verified against steering_controllers_library 2.52.1-1 (release/humble),
+ros2-gbp/ros2_controllers-release @ e966ebd97fb3aebd294500734762202c05834463.
+
+diff --git a/include/steering_controllers_library/steering_odometry.hpp b/include/steering_controllers_library/steering_odometry.hpp
+--- a/include/steering_controllers_library/steering_odometry.hpp
++++ b/include/steering_controllers_library/steering_odometry.hpp
+@@ -170,12 +170,24 @@
+   double get_angular() const { return angular_; }
+
+   /**
+-   * \brief Sets the wheel parameters: radius, separation and wheelbase
++   * \brief Sets the wheel parameters: radius, separation and wheelbase.
++   * Sets both the steering-axle and traction-axle track to \p wheel_track.
+    */
+   void set_wheel_params(
+     const double wheel_radius, const double wheelbase = 0.0, const double wheel_track = 0.0);
+
+   /**
++   * \brief Sets the wheel parameters with separate steering-axle and traction-axle track
++   * widths. Ackermann vehicles use the steering-axle track (the actual spacing between the
++   * two steered kingpins) for the steer-angle geometry, and the traction-axle track for the
++   * driven-wheel differential-speed geometry -- these differ whenever front and rear track
++   * are not equal.
++   */
++  void set_wheel_params(
++    const double wheel_radius, const double wheelbase, const double wheel_track_steering,
++    const double wheel_track_traction);
++
++  /**
+    * \brief Velocity rolling window size setter
+    * \param velocity_rolling_window_size Velocity rolling window size
+    */
+@@ -260,9 +272,10 @@
+   double angular_;  // [rad/s]
+
+   /// Kinematic parameters
+-  double wheel_track_;   // [m]
+-  double wheelbase_;     // [m]
+-  double wheel_radius_;  // [m]
++  double wheel_track_;            // [m] steering-axle track (steered kingpin spacing)
++  double wheel_track_traction_;   // [m] traction-axle track (driven-wheel spacing)
++  double wheelbase_;              // [m]
++  double wheel_radius_;           // [m]
+
+   /// Configuration type used for the forward kinematics
+   int config_type_ = -1;
+
+diff --git a/src/steering_odometry.cpp b/src/steering_odometry.cpp
+--- a/src/steering_odometry.cpp
++++ b/src/steering_odometry.cpp
+@@ -33,6 +33,7 @@
+   linear_(0.0),
+   angular_(0.0),
+   wheel_track_(0.0),
++  wheel_track_traction_(0.0),
+   wheelbase_(0.0),
+   wheel_radius_(0.0),
+   traction_wheel_old_pos_(0.0),
+@@ -143,8 +144,10 @@
+   }
+
+   // overdetermined, we take the average
+-  const double vel_r = vel_wheel_r * turning_radius / (turning_radius + wheel_track_ * 0.5);
+-  const double vel_l = vel_wheel_l * turning_radius / (turning_radius - wheel_track_ * 0.5);
++  const double vel_r =
++    vel_wheel_r * turning_radius / (turning_radius + wheel_track_traction_ * 0.5);
++  const double vel_l =
++    vel_wheel_l * turning_radius / (turning_radius - wheel_track_traction_ * 0.5);
+   return (vel_r + vel_l) * 0.5;
+ }
+
+@@ -196,6 +199,16 @@
+   wheel_radius_ = wheel_radius;
+   wheelbase_ = wheelbase;
+   wheel_track_ = wheel_track;
++  wheel_track_traction_ = wheel_track;
++}
++
++void SteeringOdometry::set_wheel_params(
++  double wheel_radius, double wheelbase, double wheel_track_steering, double wheel_track_traction)
++{
++  wheel_radius_ = wheel_radius;
++  wheelbase_ = wheelbase;
++  wheel_track_ = wheel_track_steering;
++  wheel_track_traction_ = wheel_track_traction;
+ }
+
+ void SteeringOdometry::set_velocity_rolling_window_size(size_t velocity_rolling_window_size)
+@@ -288,8 +301,8 @@
+     else
+     {
+       const double turning_radius = wheelbase_ / std::tan(phi_IK);
+-      const double Wr = Ws * (turning_radius + wheel_track_ * 0.5) / turning_radius;
+-      const double Wl = Ws * (turning_radius - wheel_track_ * 0.5) / turning_radius;
++      const double Wr = Ws * (turning_radius + wheel_track_traction_ * 0.5) / turning_radius;
++      const double Wl = Ws * (turning_radius - wheel_track_traction_ * 0.5) / turning_radius;
+       traction_commands = {Wr, Wl};
+     }
+     // simple steering
+@@ -310,8 +323,8 @@
+     else
+     {
+       const double turning_radius = wheelbase_ / std::tan(phi_IK);
+-      const double Wr = Ws * (turning_radius + wheel_track_ * 0.5) / turning_radius;
+-      const double Wl = Ws * (turning_radius - wheel_track_ * 0.5) / turning_radius;
++      const double Wr = Ws * (turning_radius + wheel_track_traction_ * 0.5) / turning_radius;
++      const double Wl = Ws * (turning_radius - wheel_track_traction_ * 0.5) / turning_radius;
+       traction_commands = {Wr, Wl};
+
+       const double numerator = 2 * wheelbase_ * std::sin(phi);

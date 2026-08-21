@@ -30,6 +30,7 @@ IMAGE_INSTALL:append = " \
     ackermann-description \
     ackermann-bringup \
     camera-sign-detect-bringup \
+    lidar-perception-bringup \
 "
 
 # --- IVI ---
@@ -151,6 +152,7 @@ IMAGE_INSTALL:append = " \
     teleop-twist-joy \
     teleop-twist-keyboard \
     ros2controlcli \
+    compressed-image-transport \
 "
 
 # --- TensorRT dev tools (ONNX -> TRT engine conversion on device) ---

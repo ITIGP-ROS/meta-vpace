@@ -1,0 +1,77 @@
+[Unit]
+Description=LiDAR perception pipeline (TensorRT PointPillars + AB3DMOT tracking)
+Documentation=file:/opt/ros/humble/share/lidar_perception_bringup/launch/perception.launch.py
+
+# /data must be mounted before ExecStartPre runs. data-partition-mount.service
+# is a oneshot ordered Before=local-fs.target, so RequiresMountsFor picks it up
+# without naming the unit -- and keeps working if the mount ever moves.
+RequiresMountsFor=/data
+
+# First start on a fresh slot builds a TensorRT engine, which takes minutes on
+# an Orin and is pure GPU work. A crash loop there is expensive, so give up
+# after 3 attempts in 10 minutes rather than thrash.
+#
+# These are [Unit] keys, NOT [Service]. They lived in [Service] until systemd
+# 229 and are still widely copied that way; systemd 255 parses the file without
+# complaint and silently ignores them there. Same trap as
+# camera-sign-detect.service.
+StartLimitIntervalSec=600
+StartLimitBurst=3
+
+[Service]
+Type=simple
+
+# rclpy wants a writable HOME for its log directory. Same reason
+# camera-sign-detect.service and update-coordinator.service set it.
+Environment=HOME=/root
+
+Environment=MODEL_SRC=/opt/ros/humble/share/cuda_pointpillars_ros/model
+Environment=MODEL_DIR=/data/lidar-perception/model
+
+# The model the pipeline loads. CHANGE THIS when the Livox-trained model lands
+# -- pointpillar_gp.onnx is the KITTI model, which is what the repo ships today.
+# See docs/TRAINING_HANDOFF.md.
+Environment=MODEL_NAME=pointpillar_gp.onnx
+
+# ── Why the model is copied to /data instead of loaded from where it installs ─
+#
+# TRT::TRT() derives the engine cache path from the MODEL PATH -- it writes
+# "<model>.<hash>.trt<ver>.sm<arch>.<precision>.engine" right next to the .onnx.
+# Left at the installed location that is /opt/ros/humble/share/..., i.e. inside
+# the rootfs.
+#
+# The rootfs is not read-only, so this would appear to work. It is still wrong:
+# swupdate writes a whole new rootfs to the OTHER A/B slot, so the cache is
+# discarded on every update and the first boot after each OTA silently spends
+# minutes rebuilding an engine it already built. /data is the only partition
+# that survives an update.
+#
+# Copy, do not symlink: the engine is written into the same directory as the
+# .onnx, so that directory has to be the writable one.
+#
+# The [ -e ] guard makes this idempotent and, more importantly, means a model
+# replaced by hand on the board is NOT silently reverted on the next boot.
+# Deleting the /data copy is how you go back to the shipped one.
+ExecStartPre=/bin/sh -c 'mkdir -p "$MODEL_DIR" && [ -e "$MODEL_DIR/$MODEL_NAME" ] || cp "$MODEL_SRC/$MODEL_NAME" "$MODEL_DIR/$MODEL_NAME"'
+
+# visualize:=false -- the visualiser publishes RViz MarkerArrays, and nothing on
+# the vehicle subscribes to them; the IVI Drive View consumes
+# /object_detections_3d directly. Set it to true when debugging with RViz over
+# the network.
+ExecStart=/bin/sh -c '. /opt/ros/humble/setup.bash && exec ros2 launch lidar_perception_bringup perception.launch.py profile:=livox visualize:=false model_path:="$MODEL_DIR/$MODEL_NAME"'
+
+# ros2 launch tears its nodes down cleanly on SIGINT; the default SIGTERM leaves
+# them to the cgroup sweep. 30s rather than the camera pipeline's 20s because
+# an in-progress engine build does not stop instantly.
+KillSignal=SIGINT
+TimeoutStopSec=30
+
+Restart=on-failure
+RestartSec=10
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=lidar-perception
+
+[Install]
+WantedBy=multi-user.target

@@ -13,7 +13,7 @@ SRC_URI = "\
     file://update-coordinator.service \
 "
 
-SRCREV = "248757936de8237a27d38f4bed64789ec27ef44b"
+SRCREV = "a5ee69272d41d625890855967036c39eab0c9d1c"
 
 S = "${WORKDIR}/git/src/update_coordinator"
 

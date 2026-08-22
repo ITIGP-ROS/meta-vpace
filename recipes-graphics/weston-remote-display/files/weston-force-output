@@ -1,6 +1,6 @@
 #!/bin/sh
 # weston-force-output — give Weston an output to render into with no panel plugged in,
-# at the resolution the IVI app is actually designed for.
+# at 2x the resolution the IVI app is actually designed for.
 #
 # WHY THIS IS NEEDED
 #
@@ -15,53 +15,74 @@
 #
 # Two steps, in this order:
 #
-#   1. Install a synthetic EDID advertising 1024x600 as the preferred mode.
+#   1. Install a synthetic EDID advertising 2048x1200 as the preferred mode.
 #   2. Write "on" to the connector's sysfs status, which forces detection to report
 #      connected and triggers a re-probe that picks the EDID up.
+#
+# WHY 2048x1200 AND NOT 1024x600
+#
+# The IVI QML is laid out for 1024x600 logical pixels -- that has not changed. But
+# weston-rdp.ini now sets `[output] scale=2` on this connector, which tells Qt to
+# render at 2x device-pixel-ratio while keeping the *logical* window size at 1024x600
+# (so the QML layout, positions and proportions are untouched -- no reflow). For that
+# to actually produce a sharper image over RDP rather than just a bigger one, the
+# connector's real physical mode has to BE 2048x1200: exactly 2x 1024x600 in both
+# dimensions, so scale=2 divides it back to exactly 1024x600 logical with no rounding
+# or aspect distortion. See weston-rdp.ini and the screen-share.c patch in the `weston`
+# bbappend for the other two-thirds of this -- Weston's screen-share.so used to throw
+# the extra resolution away before it ever reached RDP; that's now patched to keep it.
 #
 # WHY THE EDID AND NOT AN [output] MODE LINE
 #
 # Forcing the connector without an EDID gives you the kernel's fallback mode list --
-# 1024x768, 800x600, 640x480 -- and weston takes 1024x768. The IVI QML is laid out for
-# 1024x600, so the mirror comes out wrong.
-#
-# Pinning it with `[output] mode=1024x600` in weston.ini DOES NOT WORK: a bare WxH only
-# selects from modes the connector already reports, and 1024x600 is not among the
+# 1024x768, 800x600, 640x480 -- and weston takes 1024x768. Pinning it with
+# `[output] mode=2048x1200` in weston.ini DOES NOT WORK either: a bare WxH only
+# selects from modes the connector already reports, and 2048x1200 is not among the
 # fallbacks. Weston silently keeps 1024x768.
 #
 # A full modeline in [output] would work, but that section would also apply when a REAL
 # panel is attached, forcing our synthetic CVT timing onto hardware that has its own.
 # Overriding the EDID instead is precisely scoped: it only touches a connector we are
 # already forcing, so a genuinely connected panel keeps its own EDID, its own timing and
-# its own preferred mode. It also makes the two cases agree -- panel or no panel, the app
-# gets 1024x600.
+# its own preferred mode.
 #
-# Verified on the bench: modes go from [1024x768 800x600 800x600 800x600 640x480] to
-# [1024x600], and weston reports "1024x600@59.9, preferred, current, 49.0 MHz".
+# NOT YET VERIFIED ON HARDWARE. The blob below was generated from `cvt 2048 1200 60`
+# (matching how the original 1024x600 one was made -- `cvt 1024 600 60` reproduces that
+# blob's modeline exactly), then independently decoded back out of the finished bytes to
+# confirm it round-trips to the same modeline and that the whole-block checksum is
+# correct. What was NOT done is booting it: the first real test needs to confirm weston
+# actually reports "2048x1200@..., preferred, current" the way the 1024x600 version was
+# once confirmed to (see git history for that original bench note). If the debugfs
+# override is rejected for some reason specific to this mode, the fallback below is the
+# same as before: 1024x768 from the kernel's default list.
 set -e
 
 log() { echo "[weston-force-output] $*"; }
 
 # EDID 1.3, 128 bytes, one detailed timing descriptor holding the standard CVT mode:
 #
-#     Modeline  49.00  1024 1072 1168 1312  600 603 613 624  -hsync +vsync
+#     Modeline  205.25  2048 2184 2400 2752  1200 1203 1213 1245  -hsync +vsync
 #
 # Layout: 0-7 header | 8-17 vendor/product/serial/date | 18-19 version 1.3 |
 # 20-24 digital input, size, gamma, features | 25-34 chromaticity |
 # 35-37 established (none) | 38-53 standard (none) | 54-71 DETAILED TIMING (the mode) |
 # 72-125 three string descriptors | 126 extensions=0 | 127 checksum (whole block sums to 0).
 #
-# To retarget a different panel, regenerate rather than hand-editing: the detailed
-# timing block and the checksum both have to change together.
+# To retarget a different mode, regenerate rather than hand-editing: the detailed
+# timing block and the checksum both have to change together. This one was built by
+# taking `cvt 2048 1200 60`'s Modeline, packing it into the 18-byte detailed-timing
+# descriptor per the VESA EDID layout (verified against this file's own previous
+# 1024x600 blob, which decodes byte-for-byte to `cvt 1024 600 60`'s output), splicing
+# it into bytes 54-71 below, and recomputing byte 127 so the whole block sums to 0.
 EDID_HEX=$(printf '%s' '
     00ffffff ffffff00 5a030100 01000000
     01240103 800f0978 0aee91a3 544c9926
     0f505400 00000101 01010101 01010101
-    01010101 01012413 00204158 18203060
+    01010101 01012d50 00c082b0 2d4088d8
     3a009a5a 0000001c 000000fc 00565041
     43452d49 56490a20 20200000 00fe0031
     30323478 3630300a 20202020 000000fe
-    00666f72 6365640a 20202020 2020009c
+    00666f72 6365640a 20202020 20200018
 ' | tr -d '[:space:]')
 
 # Materialise the blob and install it.
@@ -120,12 +141,12 @@ for _status in /sys/class/drm/card*-*/status; do
     done
 
     if [ -n "$_ovr" ] && write_edid "$_ovr"; then
-        log "$_name: installed synthetic 1024x600 EDID"
+        log "$_name: installed synthetic 2048x1200 EDID"
     else
         # Not fatal. Without the override the kernel's fallback modes still give weston
         # an output -- just 1024x768, so the mirror will not match the app's layout.
         log "WARNING: $_name: could not write edid_override (debugfs not mounted?) —"
-        log "         continuing without it; expect 1024x768 instead of 1024x600"
+        log "         continuing without it; expect 1024x768 instead of 2048x1200"
     fi
 
     if echo on > "$_status" 2>/dev/null; then
@@ -139,3 +160,46 @@ done
 # Not an error: a board with the panel actually plugged in reaches here having forced
 # nothing, which is the correct outcome.
 log "done ($_forced connector(s) forced)"
+
+# ---------------------------------------------------------------------------
+# Tell ivi-app.service what device-pixel-ratio to render the QML at.
+#
+# The IVI's Main.qml is a fixed ApplicationWindow { width: 1024; height: 600 }
+# with fixed-pixel fonts and icons, so its layout is only correct when QML's
+# logical viewport is exactly 1024x600. kiosk-shell fullscreens the app to the
+# whole output, which makes that viewport (output width / QT_SCALE_FACTOR).
+# So on the synthetic 2048x1200 output the app must render at factor 2: same
+# 1024x600 layout, but into a real 2048x1200 buffer -- 4x the pixels for the
+# RDP mirror to carry, which is the whole point of the oversized EDID above.
+#
+# Weston's own `[output] scale=2` is the textbook way to do this and does NOT
+# work on this weston 13.0.1 + kiosk-shell + NVIDIA stack (the client ends up
+# placed 1:1 in the top-left quarter of the output, rest black -- see
+# weston-rdp.ini). Driving it from the client side keeps the compositor at
+# scale=1 and avoids that path entirely.
+#
+# Keyed off the connector's ACTUAL resulting mode rather than "did this run
+# install the EDID", because this unit re-runs on every weston start and the
+# second run finds the connector already forced-on, skips it at the
+# "really connected" check above, and installs nothing -- while the mode is
+# still very much 2048x1200. Reading the mode is correct on every path,
+# including the write_edid failure above that leaves us on 1024x768.
+_scale_env=/run/ivi-scale.env
+_mode_w=0
+for _modes in /sys/class/drm/card*-*/modes; do
+    _c=$(dirname "$_modes")
+    [ "$(cat "$_c/status" 2>/dev/null)" = "connected" ] || continue
+    _mode_w=$(sed -n 1p "$_modes" 2>/dev/null | cut -dx -f1)
+    break
+done
+
+if [ "${_mode_w:-0}" -ge 2048 ] 2>/dev/null; then
+    # EnvironmentFile format: bare KEY=VALUE, no `export`, no quotes needed.
+    printf 'QT_SCALE_FACTOR=2\n' > "$_scale_env"
+    log "mode is ${_mode_w}px wide — wrote $_scale_env (QT_SCALE_FACTOR=2)"
+else
+    # Removed rather than written as 1: ivi-app.service reads this with a
+    # leading `-` (optional), so absent means "Qt default", which is 1.
+    rm -f "$_scale_env"
+    log "mode is ${_mode_w}px wide — removed $_scale_env (app renders at 1x)"
+fi

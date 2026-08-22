@@ -1,0 +1,103 @@
+From 1970a52d6a569debf500e5c18769f4c277e985a6 Mon Sep 17 00:00:00 2001
+From: V-PACE <yocto@vpace>
+Date: Sat, 22 Aug 2026 03:27:35 +0300
+Subject: [PATCH] screen-share: throttle the mirror to ~12fps
+
+shared_output_repainted() runs the whole readback/composite/RFX-or-NSC-encode/
+send chain on every single compositor repaint -- up to the output's full
+refresh rate -- with no rate limit at all. That is real, recurring CPU and
+network cost that scales directly with how often it runs, and it is currently
+uncapped.
+
+This is a mirror of a dashboard UI, not a game: 24fps is visually
+indistinguishable from 60 for anything short of fast motion, and capping the
+mirror there cuts that recurring cost by roughly half to two-thirds. Crucially
+this only throttles the RDP-bound copies -- the main compositor keeps
+repainting the real output at whatever rate it likes, so the app's own touch
+responsiveness and animation smoothness are completely unaffected.
+
+Adds SHARED_OUTPUT_MIN_UPDATE_MSEC (1000/12) and a last_update timestamp on
+struct shared_output, both zero-cost when not throttling: last_update is
+zero-initialised by shared_output_create()'s existing zalloc(), so the very
+first repaint after startup is never gated, and weston_compositor_get_time()
+plus timespec_sub_to_msec() (already used elsewhere in weston, no new
+includes needed) are cheap enough to call unconditionally at the top of the
+function.
+
+Upstream-Status: Pending
+---
+ compositor/screen-share.c | 45 +++++++++++++++++++++++++++++++++++++++++++++
+ 1 file changed, 45 insertions(+)
+
+diff --git a/compositor/screen-share.c b/compositor/screen-share.c
+index 6a8b708..9122660 100644
+--- a/compositor/screen-share.c
++++ b/compositor/screen-share.c
+@@ -51,12 +51,42 @@
+ #include <libweston/shell-utils.h>
+ #include "fullscreen-shell-unstable-v1-client-protocol.h"
+ 
++/* Caps how often shared_output_repainted() does real work (readback,
++ * composite, RFX/NSC encode, send) rather than running it on every single
++ * compositor repaint. This is a mirror of a dashboard UI, not a game, and it
++ * cuts the recurring CPU/bandwidth cost of the mirror path without touching
++ * how often the *app itself* renders.
++ *
++ * 12, not 24. Measured on the board at 2048x1200 with the 24fps cap in place:
++ *   - the mirror (nested weston, rdp-backend) sat at ~200% CPU, i.e. 2 of the
++ *     6 cores, in a 15-thread FreeRDP RemoteFX encoder pool;
++ *   - it pushed ~55 Mbit/s over a WiFi link whose AP caps it to 802.11n
++ *     20MHz / 144 Mbit/s PHY (~70-90 Mbit/s of real TCP), i.e. saturation;
++ *   - so the socket send queue sat at a sustained ~3.5 MB, which at 6.9 MB/s
++ *     is ~500ms of frames buffered before one ever leaves the board.
++ * The delay was queueing, not encoding. Halving the mirror rate halves both
++ * the encode CPU and the bitrate, which is what actually lets the queue drain.
++ *
++ * Note this cost is NOT proportional to what changes on screen: the IVI damages
++ * its full 2048x1200 surface on essentially every frame (measured: 1566 of 1572
++ * wl_surface.damage calls were the entire surface), so every one of weston's
++ * damage optimisations along this path is inert and each frame is a full
++ * 2.4-megapixel readback, composite and encode. Fixing that in the QML would
++ * beat any framerate cap, but is out of this patch's scope. */
++#define SHARED_OUTPUT_MIN_UPDATE_MSEC (1000 / 12)
++
+ struct shared_output {
+ 	struct weston_output *output;
+ 	struct wl_listener output_destroyed;
+ 	struct wl_list seat_list;
+ 	struct wl_list output_link;	/** screen_share::output_list */
+ 
++	/* Last time shared_output_repainted() actually did work, for the
++	 * SHARED_OUTPUT_MIN_UPDATE_MSEC gate. Zero-initialised by the zalloc()
++	 * in shared_output_create(), so the first repaint after startup is
++	 * never throttled. */
++	struct timespec last_update;
++
+ 	struct {
+ 		struct wl_display *display;
+ 		struct wl_registry *registry;
+@@ -841,6 +871,21 @@ shared_output_repainted(struct wl_listener *listener, void *data)
+ 	const struct pixel_format_info *read_format =
+ 		so->output->compositor->read_format;
+ 	const pixman_format_code_t pixman_format = read_format->pixman_format;
++	struct timespec now;
++
++	/* Rate-limit gate: skip the whole readback/composite/encode/send chain
++	 * unless SHARED_OUTPUT_MIN_UPDATE_MSEC has actually elapsed since the
++	 * last update that went out. The compositor keeps repainting the real
++	 * output (and so->output stays fully up to date) at whatever rate it
++	 * likes -- this only throttles how often the RDP-bound mirror copies
++	 * that. so->last_update is only written on the path that proceeds past
++	 * this check, so it always measures time between updates that actually
++	 * happened, not wall-clock ticks. */
++	weston_compositor_get_time(&now);
++	if (!timespec_is_zero(&so->last_update) &&
++	    timespec_sub_to_msec(&now, &so->last_update) < SHARED_OUTPUT_MIN_UPDATE_MSEC)
++		return;
++	so->last_update = now;
+ 
+ 	width = so->output->current_mode->width;
+ 	height = so->output->current_mode->height;
+-- 
+2.34.1
+

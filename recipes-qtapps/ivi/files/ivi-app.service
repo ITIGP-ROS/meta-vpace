@@ -32,6 +32,35 @@ Environment="QT_QPA_PLATFORMTHEME=gtk2"
 Environment="HOME=/home/weston"
 Environment="XDG_RUNTIME_DIR=/run/user/1000"
 Environment="WAYLAND_DISPLAY=wayland-1"
+
+# HiDPI for the RDP mirror. Supplies QT_SCALE_FACTOR=2, and nothing else.
+#
+# Main.qml is a fixed `ApplicationWindow { width: 1024; height: 600 }` whose
+# fonts and icons are fixed-pixel (font.pixelSize: 26, icons 50x50) while its
+# containers are fraction-based, so the layout is only correct when QML's
+# logical viewport is exactly 1024x600 — and it only gets sharper if that
+# viewport is rendered at a device-pixel-ratio above 1. kiosk-shell fullscreens
+# us to the whole output, making the viewport (output width / QT_SCALE_FACTOR),
+# so the 2048x1200 output wants factor 2: same layout, 4x the pixels.
+#
+# Written by weston-force-output, which is the one place that knows whether the
+# synthetic 2048x1200 EDID is in effect, and which reads the connector's actual
+# resulting mode to decide. Deliberately NOT a plain Environment= line here: the
+# same unit runs on a vehicle with a real 1024x600 panel, where that EDID is
+# never installed, and a hardcoded 2 would give a 512x300 logical viewport and
+# cram the 1024-wide layout into half the space (this was tried — the result is
+# visibly garbled text and icons).
+#
+# The leading `-` makes it optional, which is what gives the panel case the
+# right answer for free: no file means no QT_SCALE_FACTOR means Qt's default of
+# 1. weston-force-output removes the file whenever the mode is under 2048 wide,
+# so a fallback to the kernel's 1024x768 modes also lands at 1x rather than
+# staying stuck at a 2 that no longer fits.
+#
+# Ordering is guaranteed: weston-headless-output.service (which runs
+# weston-force-output) is Before=weston.service, and this unit is
+# After=weston.service.
+EnvironmentFile=-/run/ivi-scale.env
 ExecStart=/bin/sh -c '. /opt/ros/humble/setup.bash && exec /bin/appIVI'
 Restart=on-failure
 RestartSec=5

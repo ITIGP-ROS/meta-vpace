@@ -70,7 +70,7 @@ IMAGE_INSTALL:append = " \
     "
 
 # JoySticks support
-IMAGE_INSTALL:append = " kernel-module-xpad kernel-module-joydev "
+IMAGE_INSTALL:append = " kernel-module-xpad kernel-module-joydev kernel-module-uhid "
 
 # --- OTA & Telemetry ---
 IMAGE_INSTALL:append = " ivi-ota-agent"

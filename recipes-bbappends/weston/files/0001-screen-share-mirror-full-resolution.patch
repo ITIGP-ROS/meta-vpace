@@ -1,0 +1,102 @@
+From 2e50a069ece19d96fe8aedd2462904763d10c37f Mon Sep 17 00:00:00 2001
+From: V-PACE <yocto@vpace>
+Date: Sat, 22 Aug 2026 02:53:01 +0300
+Subject: [PATCH] screen-share: mirror the output's full physical resolution
+
+screen-share.so builds the buffer it hands to a mirrored output (e.g. the
+RDP backend in weston-remote-display) from weston_output's logical
+(post-scale) width/height, not its physical current_mode size. The
+capture step earlier in the same file (shared_output_repainted()) already
+reads the compositor's framebuffer at full current_mode resolution into
+so->cache_image -- the extra detail exists in memory -- but
+shared_output_get_shm_buffer() then allocates the outgoing shm buffer at
+the smaller logical size, and shared_output_update()'s composite applies
+a current_scale downsample on the way out. For a scale=1 output this is a
+no-op; for a HiDPI-scaled output (scale=2 in weston-rdp.ini, paired with
+a 2x synthetic EDID in weston-force-output) it silently throws away
+exactly the resolution the scale was set up to capture.
+
+This is a known, intentional simplification upstream, not a bug: the
+function's own comment says the remote surface is 'scale=1... so if the
+output has a different scale... this is effectively undone (possibly by
+throwing away pixels in a later step).' We want that step to keep the
+pixels instead, since the destination here is an RDP-mirrored head unit
+viewed fullscreen on a much higher-resolution monitor, where the
+downsample-then-upscale round trip is exactly the pixelation we're
+trying to avoid.
+
+Three changes, all in compositor/screen-share.c:
+  - shared_output_get_shm_buffer(): allocate width/height from
+    output->current_mode instead of output->width/height, so the shm
+    buffer (and its stride, mmap size, and damage region, all derived
+    from the same locals) is sized for the full physical resolution.
+  - output_compute_transform(): drop the trailing current_scale
+    pixman_transform_scale(). so->cache_image and the shm buffer are now
+    both current_mode-sized, so the copy is 1:1; rotation/flip handling
+    for a real rotated panel is untouched.
+  - shared_output_update(): the final pixman_image_composite32() call
+    copies output->current_mode->width/height instead of
+    output->width/height, so the whole buffer is copied rather than just
+    its top-left logical-sized corner.
+
+The PIXMAN_FILTER_NEAREST/BILINEAR selection a few lines above is left
+as-is -- it becomes a harmless no-op once the transform carries no scale.
+
+Only takes effect where scale != 1 is actually configured. At the
+default scale=1 this is a no-op (current_mode and the old logical
+width/height are the same value), so it doesn't affect a normal
+scale=1 output.
+
+Upstream-Status: Pending
+
+---
+ compositor/screen-share.c | 19 ++++++++++++-------
+ 1 file changed, 12 insertions(+), 7 deletions(-)
+
+diff --git a/compositor/screen-share.c b/compositor/screen-share.c
+index 305bab1..6a8b708 100644
+--- a/compositor/screen-share.c
++++ b/compositor/screen-share.c
+@@ -440,8 +440,12 @@ shared_output_get_shm_buffer(struct shared_output *so)
+ 	int fd;
+ 	unsigned char *data;
+ 
+-	width = so->output->width;
+-	height = so->output->height;
++	/* Use the output's physical (current_mode) size rather than its
++	 * logical (post-scale) size, so a HiDPI-scaled output's mirror
++	 * buffer carries the full resolution instead of being silently
++	 * downsampled back to scale=1 in shared_output_update(). */
++	width = so->output->current_mode->width;
++	height = so->output->current_mode->height;
+ 	stride = width * 4;
+ 
+ 	/* If the size of the output changed, we free the old buffers and
+@@ -571,9 +575,10 @@ output_compute_transform(struct weston_output *output,
+ 		break;
+ 	}
+ 
+-	pixman_transform_scale(transform, NULL,
+-			       pixman_fixed_1 * output->current_scale,
+-			       pixman_fixed_1 * output->current_scale);
++	/* No post-scale here: so->cache_image and the shm buffer are now
++	 * both sized from current_mode (see shared_output_get_shm_buffer()),
++	 * so a 1:1 copy is correct. Scaling by current_scale on top of that
++	 * would sample cache_image out of its own bounds. */
+ }
+ 
+ static void
+@@ -674,8 +679,8 @@ shared_output_update(struct shared_output *so)
+ 				 0, 0, /* src_x, src_y */
+ 				 0, 0, /* mask_x, mask_y */
+ 				 0, 0, /* dest_x, dest_y */
+-				 so->output->width, /* width */
+-				 so->output->height /* height */);
++				 so->output->current_mode->width, /* width */
++				 so->output->current_mode->height /* height */);
+ 
+ 	pixman_image_set_transform(sb->pm_image, NULL);
+ 	pixman_image_set_clip_region32(sb->pm_image, NULL);
+-- 
+2.34.1
+

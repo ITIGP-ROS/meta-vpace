@@ -178,6 +178,19 @@ fi
 # sync=false: this is a live capture feed, not playback. With sync=true gstreamer
 # would try to honour timestamps against the pipeline clock and drift against
 # PulseAudio's, which shows up as audio that slowly falls behind.
+#
+# client-name IS NOT COSMETIC. Without it the stream is called "gst-launch-1.0",
+# and module-stream-restore keys its remembered routing on the application name:
+# "sink-input-by-application-name:gst-launch-1.0". Every other gst-launch on the
+# box shares that key, so as soon as one of them is pointed at a real output —
+# by the user, or by stream-restore itself when a USB sound card appears and
+# becomes the default — the saved device is applied to THIS stream too, and it
+# overrides the explicit device= below.
+#
+# The failure is loud in the worst way: the remote microphone comes out of the
+# vehicle's speakers, and the IVI app captures silence because ivi_mic never
+# receives anything. A private name gives this pipeline its own key, so it is
+# routed by device= and stream-restore only ever remembers ivi_mic for it.
 exec gst-launch-1.0 -q \
     udpsrc address="$ADDR" port="$PORT" \
         caps="application/x-rtp,media=(string)audio,clock-rate=(int)48000,encoding-name=(string)OPUS" ! \
@@ -186,4 +199,4 @@ exec gst-launch-1.0 -q \
     opusdec plc=true ! \
     audioconvert ! audioresample ! \
     audio/x-raw,rate=16000,channels=1 ! \
-    pulsesink device="$SINK" sync=false
+    pulsesink device="$SINK" sync=false client-name=ivi-remote-mic

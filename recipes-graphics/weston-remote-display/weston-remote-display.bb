@@ -22,6 +22,9 @@ SRC_URI = "\
     file://weston-force-output \
     file://weston-remote-display \
     file://weston-remote-display.conf \
+    file://weston-rdp-reset \
+    file://weston-rdp-reset.service \
+    file://50-weston-rdp-reset \
 "
 
 # Portable across Yocto releases: scarthgap+ defines UNPACKDIR (files land in
@@ -32,12 +35,17 @@ S = "${UNPACKDIR}"
 
 inherit systemd
 
-SYSTEMD_SERVICE:${PN} = "weston-rdp-tls.service weston-headless-output.service"
+SYSTEMD_SERVICE:${PN} = "weston-rdp-tls.service weston-headless-output.service \
+                         weston-rdp-reset.service"
 # Neither is auto-enabled, and they do not need to be: the vendor drop-in's Wants=
 # starts them as dependencies of weston.service, and Wants= works whether or not a
 # unit is enabled. Enabling them here as well would just start them twice at boot.
 # Masking the drop-in with `weston-remote-display off` correctly takes them out of
 # the picture too, which would not happen if they were enabled independently.
+#
+# weston-rdp-reset.service is disabled for a different reason: it is a oneshot started
+# on demand by the NetworkManager dispatcher hook when the WiFi address changes. There
+# is nothing for it to do at boot, and enabling it would restart weston on every boot.
 SYSTEMD_AUTO_ENABLE = "disable"
 
 # weston   -> the compositor, plus screen-share.so and fullscreen-shell.so
@@ -59,6 +67,7 @@ do_install() {
     install -m 0755 ${S}/weston-remote-display ${D}${bindir}/weston-remote-display
     install -m 0755 ${S}/weston-rdp-gen-cert   ${D}${bindir}/weston-rdp-gen-cert
     install -m 0755 ${S}/weston-force-output   ${D}${bindir}/weston-force-output
+    install -m 0755 ${S}/weston-rdp-reset      ${D}${bindir}/weston-rdp-reset
 
     # Alongside weston-init's weston.ini, never on top of it: that package owns
     # weston.ini and this one owns weston-rdp.ini, so the two never collide.
@@ -70,6 +79,22 @@ do_install() {
         ${D}${systemd_system_unitdir}/weston-rdp-tls.service
     install -m 0644 ${S}/weston-headless-output.service \
         ${D}${systemd_system_unitdir}/weston-headless-output.service
+    install -m 0644 ${S}/weston-rdp-reset.service \
+        ${D}${systemd_system_unitdir}/weston-rdp-reset.service
+
+    # The dispatcher hook goes in the READ-ONLY dispatcher directory, not /etc -- the
+    # same call nm-config.bb makes for static-eth.nmconnection. NetworkManager reads
+    # both, and an image-provided script belongs in the one runtime never edits.
+    #
+    # 0755 root:root is REQUIRED, not tidiness: NetworkManager silently ignores
+    # dispatcher scripts that are not executable or that are group/other-writable.
+    #
+    # No RDEPENDS on networkmanager on purpose. The hook is inert without it -- the
+    # directory simply goes unread -- and coupling recipes-graphics to
+    # recipes-connectivity for a no-op file is not worth it.
+    install -d ${D}${nonarch_libdir}/NetworkManager/dispatcher.d
+    install -m 0755 ${S}/50-weston-rdp-reset \
+        ${D}${nonarch_libdir}/NetworkManager/dispatcher.d/50-weston-rdp-reset
 
     # The vendor drop-in. THIS is what makes remote display on by default -- it
     # re-points weston.service at weston-rdp.ini. `weston-remote-display off` masks it
@@ -85,6 +110,8 @@ FILES:${PN} += "\
     ${systemd_system_unitdir}/weston-rdp-tls.service \
     ${systemd_system_unitdir}/weston-headless-output.service \
     ${systemd_system_unitdir}/weston.service.d/10-remote-display.conf \
+    ${systemd_system_unitdir}/weston-rdp-reset.service \
+    ${nonarch_libdir}/NetworkManager/dispatcher.d/50-weston-rdp-reset \
 "
 
 # Same treatment weston-init gives weston.ini: a local edit to the RDP config (a

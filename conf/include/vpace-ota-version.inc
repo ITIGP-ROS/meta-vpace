@@ -40,4 +40,4 @@
 # forgets, and the failure is invisible until a flashed board misbehaves.
 # ============================================================================
 
-VPACE_OTA_VERSION ?= "1.0.6"
+VPACE_OTA_VERSION ?= "1.1.2"

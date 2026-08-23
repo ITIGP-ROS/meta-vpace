@@ -1,0 +1,38 @@
+#!/bin/sh
+# NetworkManager dispatcher hook: kick weston-rdp-reset when the WiFi address changes.
+#
+# NM runs dispatcher scripts SYNCHRONOUSLY and waits for them, so this must return
+# immediately -- hence `systemctl start --no-block` against a oneshot unit rather than
+# restarting weston inline. Doing the restart here risks NM's dispatcher timeout
+# killing it halfway through, which would leave weston down and the head unit black.
+#
+# All the actual decision-making is in weston-rdp-reset, which no-ops unless there is a
+# genuinely orphaned peer. That is what keeps this from bouncing the UI at boot, when
+# WiFi comes up for the first time and this fires with nothing to fix.
+#
+# INSTALLED 0755 root:root. NetworkManager SILENTLY IGNORES dispatcher scripts that are
+# not executable, or that are group- or other-writable -- same class of quiet failure
+# as the 0600 keyfile rule in 20-keyfile-path.conf.
+#
+# $1 = interface name, $2 = action.
+IFACE="$1"
+ACTION="$2"
+
+# wl* rather than a hardcoded name: this board is wlP1p1s0, but the layer's own notes
+# reference a wlu2u2 USB dongle. Ethernet is the LiDAR link (never-default=true) and
+# never carries RDP, so it is not a candidate no matter what happens to it.
+case "$IFACE" in
+    wl*) ;;
+    *)   exit 0 ;;
+esac
+
+# `up` covers joining a different network; `dhcp4-change` covers the same SSID handing
+# out a different lease. `down` is deliberately NOT here -- at that point the old
+# address is gone but the new one has not arrived, so restarting would race the
+# reconnect and we would just orphan the mirror again on the way back up.
+case "$ACTION" in
+    up|dhcp4-change) ;;
+    *)               exit 0 ;;
+esac
+
+exec systemctl start --no-block weston-rdp-reset.service

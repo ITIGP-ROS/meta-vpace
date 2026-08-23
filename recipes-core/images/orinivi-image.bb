@@ -107,6 +107,9 @@ IMAGE_INSTALL:append = " kernel-module-iwlwifi kernel-module-iwlmvm linux-firmwa
 # image, the .ddc the tuning parameters); the 8260 takes ibt-11-5 and the 7265 ibt-hw-37-8.
 IMAGE_INSTALL:append = " kernel-module-btusb kernel-module-btintel kernel-module-btrtl kernel-module-btbcm "
 IMAGE_INSTALL:append = " linux-firmware-ibt-12-16 "
+# bluetoothd policy. bluez5 ships no main.conf, so without this the adapter is DOWN
+# after every boot and the gamepad cannot connect until somebody brings hci0 up by hand.
+IMAGE_INSTALL:append = " bluez-config "
 # CAN kernel modules
 IMAGE_INSTALL:append = " can-utils kernel-module-can kernel-module-mttcan kernel-module-can-raw "
 # USB camera kernel module

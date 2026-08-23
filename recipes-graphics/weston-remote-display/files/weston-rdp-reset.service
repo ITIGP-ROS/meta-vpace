@@ -1,0 +1,17 @@
+# Reset the RDP mirror after a network change. Started on demand by the NetworkManager
+# dispatcher hook (50-weston-rdp-reset), never enabled at boot -- there is nothing to
+# reset until the box has actually changed networks.
+#
+# This exists as a unit rather than living inside the dispatcher script so the restart
+# escapes NM's dispatcher timeout and gets its own journal identity:
+#     journalctl -u weston-rdp-reset
+# It is also how you test the thing by hand without touching the network.
+[Unit]
+Description=Reset the Weston RDP mirror after a network change
+# Deliberately not Requires=weston.service: if weston is not running there is nothing
+# to reset, and weston-rdp-reset exits 0 on its own after finding no orphaned peer.
+After=NetworkManager.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/weston-rdp-reset

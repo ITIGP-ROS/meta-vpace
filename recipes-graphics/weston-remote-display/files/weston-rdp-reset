@@ -1,0 +1,115 @@
+#!/bin/sh
+# Reset the RDP mirror after the box changes networks.
+#
+# THE FAILURE THIS EXISTS FOR
+#
+# Changing WiFi mid-session -- normally from the IVI itself -- leaves the RDP peer
+# socket bound to an address that no longer exists on any interface. Linux does NOT
+# reset TCP sockets when their local address is removed, so it stays ESTABLISHED
+# forever while weston keeps queueing mirror frames into it. At 2048x1200 the send
+# buffer fills in seconds. Once that peer is permanently unwritable the mirror's event
+# loop stops calling accept(), so new clients complete their TCP handshake and are then
+# never answered -- Remmina sits on "Connecting..." rather than reporting a refusal,
+# which is what makes this look like a client or a firewall problem instead of a
+# server that stopped answering the door.
+#
+# Observed on the unit 2026-08-23: one orphan on 192.168.0.248:3389 (an address the
+# board no longer had) with 3597862 bytes stuck in its send queue, seven of our own
+# connection attempts sitting unaccepted behind it at Recv-Q 19 -- exactly the size of
+# an X.224 Connection Request, i.e. read by nobody.
+#
+# NOTHING REAPS IT ON ITS OWN, AT ANY LAYER. All three were checked on the board:
+#
+#   TCP     weston never sets SO_KEEPALIVE on peer sockets, so tcp_keepalive_time
+#           (7200) never even runs, and tcp_user_timeout is unset. That leaves
+#           tcp_retries2 (15), which only kills a connection whose RETRANSMITS time
+#           out on the wire. These fail locally instead -- the socket's bound source
+#           address is gone, so routing to the old peer no longer matches it -- and a
+#           local error is a soft error that does not advance that counter.
+#   RDP     no mandatory heartbeat in the protocol, and FreeRDP 2.11.8's server-side
+#           dead-peer detection is not enabled in this build.
+#   weston  rdp-backend has no per-peer write timeout. It just keeps queueing.
+#
+# WHY A FULL weston RESTART AND NOT SOMETHING SMALLER
+#
+# The mirror is a nested weston spawned by screen-share.so via start-on-startup=true,
+# and screen-share does NOT respawn it when it exits. Confirmed the hard way on the
+# unit: after the backlog finally drained the mirror exited, and port 3389 simply
+# stopped listening -- weston's main process stayed up and healthy and gave no hint of
+# it, because screen-share failures are logged by the child, not the parent. So there
+# is no lever smaller than the compositor.
+#
+# That is the honest cost of this approach: every reset is a black head unit and an
+# ivi-app restart. The real fix is dropping dead peers in rdp-backend (SO_KEEPALIVE or
+# a write timeout) so the listener never stalls in the first place; this is the cheap
+# mitigation that needs no weston patch.
+set -e
+
+DROPIN="/etc/systemd/system/weston.service.d/10-remote-display.conf"
+PORT=3389
+
+# Every IPv4 address currently on the box, in /proc/net/tcp's little-endian hex form.
+current_addrs_hex() {
+    ip -4 -o addr show 2>/dev/null \
+        | awk '{ split($4, a, "/"); split(a[1], o, ".");
+                 printf "%02X%02X%02X%02X\n", o[4], o[3], o[2], o[1] }'
+}
+
+# Is there an ESTABLISHED socket on our port whose LOCAL address is gone? That is the
+# orphan, and it is the whole reason to restart -- checking for it is what keeps this
+# from bouncing the UI at boot or when nobody was connected.
+#
+# Parsed out of /proc rather than ss(8)/netstat(8) for the reason weston-remote-display
+# already documents: this image is BusyBox with no package manager, and its netstat has
+# no -p. Fields are: sl local_address rem_address st ... ; st 01 is TCP_ESTABLISHED.
+#
+# IPv4 only on purpose -- the RDP listener binds 0.0.0.0, so there is never a v6 peer
+# to orphan.
+has_orphan_peer() {
+    _hexport=$(printf '%04X' "$PORT")
+    _cur=$(current_addrs_hex)
+    awk -v cur="$_cur" -v port="$_hexport" '
+        NR > 1 {
+            split($2, l, ":")
+            if (l[2] == port && $4 == "01" &&
+                index("\n" cur "\n", "\n" l[1] "\n") == 0) { found = 1 }
+        }
+        END { exit !found }
+    ' /proc/net/tcp
+}
+
+case "${1:-}" in
+    --force) FORCE=1 ;;
+    "")      FORCE=0 ;;
+    *)       echo "usage: ${0##*/} [--force]" >&2; exit 2 ;;
+esac
+
+# Remote display off means there is no mirror to reset and no reason to bounce the UI.
+if [ -f "$DROPIN" ]; then
+    echo "remote display is off — nothing to do."
+    exit 0
+fi
+
+if [ "$FORCE" != "1" ] && ! has_orphan_peer; then
+    echo "no orphaned RDP peer — leaving weston alone."
+    exit 0
+fi
+
+if [ "$FORCE" = "1" ]; then
+    echo "--force given — resetting the mirror without checking for an orphan."
+else
+    echo "orphaned RDP peer found (local address no longer on this box) — resetting the mirror."
+fi
+
+# ivi-app.service has Requires=weston.service, and systemd propagates the STOP half of
+# that but does not start the app again by itself, so a bare `systemctl restart weston`
+# leaves the screen empty. Same reasoning as restart_stack() in weston-remote-display;
+# tolerate the unit being absent so this still works on an image built without the IVI
+# package.
+systemctl restart weston
+if systemctl list-unit-files ivi-app.service >/dev/null 2>&1; then
+    systemctl restart ivi-app \
+        || echo "warning: ivi-app did not come back — check journalctl -u ivi-app" >&2
+fi
+
+echo "mirror reset."

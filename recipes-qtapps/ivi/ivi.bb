@@ -5,6 +5,7 @@ SRC_URI = " \
     git://github.com/ITIGP-ROS/IVI.git;protocol=https;branch=main \
     file://ivi-app.service \
     file://ivi-tmpfiles.conf \
+    file://dds-udp-only.xml \
 "
 
 SRCREV = "${AUTOREV}"
@@ -137,6 +138,19 @@ do_install:append() {
     install -d ${D}${systemd_system_unitdir}
     install -m 0644 ${UNPACKDIR}/ivi-app.service ${D}${systemd_system_unitdir}/
 
+    # Fast DDS transport profile: UDPv4 only, no shared memory.
+    #
+    # Load-bearing, not tuning. appIVI runs as `weston` while the ROS
+    # publishers run as `root`, and Fast DDS shared-memory ports are created
+    # 0644 by their owning user, so the cross-user SHM channel silently never
+    # forms -- discovery matches, no data ever arrives. ivi-app.service points
+    # FASTRTPS_DEFAULT_PROFILES_FILE at this; the file itself carries the full
+    # rationale, the measurements, and when to revisit the tradeoff.
+    #
+    # 0644 so the weston-owned app can read it at startup.
+    install -d ${D}${sysconfdir}
+    install -m 0644 ${UNPACKDIR}/dds-udp-only.xml ${D}${sysconfdir}/
+
     # Install Vosk model from git repo assets
     install -d ${D}/usr/assets/models/vosk
     cp -r ${S}/assets/models/vosk/* ${D}/usr/assets/models/vosk/
@@ -156,6 +170,7 @@ FILES:${PN} += " \
     ${systemd_system_unitdir}/ivi-app.service \
     /var/lib/ivi/media \
     ${nonarch_libdir}/tmpfiles.d/ivi-tmpfiles.conf \
+    ${sysconfdir}/dds-udp-only.xml \
 "
 
 SYSTEMD_AUTO_ENABLE = "enable"

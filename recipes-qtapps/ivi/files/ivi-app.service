@@ -33,6 +33,26 @@ Environment="HOME=/home/weston"
 Environment="XDG_RUNTIME_DIR=/run/user/1000"
 Environment="WAYLAND_DISPLAY=wayland-1"
 
+# Fast DDS: UDPv4 only, no shared memory. Load-bearing -- without it this app
+# receives NOTHING from the ROS publishers, while still appearing correctly
+# matched to them.
+#
+# This app runs as `weston`; the perception publishers run as `root`. Fast DDS
+# creates its /dev/shm ports with the creating process's umask (0644), so the
+# second user gets read-only access and a RELIABLE reader cannot write its
+# ACKNACKs back to the writer's port. Discovery is over UDP multicast and
+# succeeds regardless, so `ros2 topic info -v` shows the subscription MATCHED
+# with a stable GID and compatible QoS while zero samples are delivered.
+#
+# Measured, same publisher, same instant: `ros2 topic hz /object_detections_3d`
+# gives 9.6 Hz as root, nothing at all as weston, and 9.6 Hz as weston with
+# this profile. Whether it happened to work after a given boot depended on
+# which user's participant created the shared port first, which is why
+# restarting the IVI sometimes appeared to fix it.
+#
+# See dds-udp-only.xml for the full rationale and the performance tradeoff.
+Environment="FASTRTPS_DEFAULT_PROFILES_FILE=/etc/dds-udp-only.xml"
+
 # HiDPI for the RDP mirror. Supplies QT_SCALE_FACTOR=2, and nothing else.
 #
 # Main.qml is a fixed `ApplicationWindow { width: 1024; height: 600 }` whose

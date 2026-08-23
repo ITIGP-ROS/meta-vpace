@@ -1,0 +1,85 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!--
+  Fast DDS transport profile for appIVI: UDPv4 only, no shared memory.
+
+  WHY THIS EXISTS
+  ===============
+  appIVI runs as the `weston` user. Every ROS 2 publisher it subscribes to
+  (cuda_pointpillars_node and the rest of the perception pipeline) runs as
+  `root`. Fast DDS creates its shared-memory segments and port ring buffers
+  under /dev/shm using the creating process's umask, which yields mode 0644:
+
+      -rw-r--r-- root   root   fastrtps_port7421          <- root publisher
+      -rw-r--r-- weston weston fastrtps_port7417          <- appIVI
+      -rw-r--r-- root   root   sem.fastrtps_port7421_mutex
+
+  Whichever user creates a port owns it, and the other user then holds only
+  read access. A RELIABLE reader has to write ACKNACKs back into the writer's
+  port, so `weston` cannot complete the SHM channel to a root-owned publisher.
+
+  The failure is silent and looks like anything but a transport problem:
+  discovery runs over UDP multicast and succeeds, so `ros2 topic info -v`
+  reports the subscription MATCHED, with a stable GID and fully compatible QoS
+  on both ends -- while not a single sample is ever delivered and the app's ROS
+  spin thread sits at zero CPU.
+
+  MEASURED
+  ========
+  Identical `ros2 topic hz /object_detections_3d`, same publisher, same instant:
+
+      as root    -> 9.6 Hz
+      as weston  -> nothing at all
+      as weston, with this profile -> 9.6 Hz
+
+  It is intermittent across boots only because it depends on which user's
+  participant created the shared port first, which is why restarting the IVI
+  sometimes appeared to fix it and sometimes did not.
+
+  COST
+  ====
+  Shared memory is genuinely faster than loopback UDP, but not measurably so at
+  this traffic. Measured on /object_detections_3d: mean message 2.5-2.8 KB (max
+  3.98 KB), ~20 KB/s. One UDP datagram per message, no fragmentation. The SHM
+  advantage on a 2.5 KB payload is on the order of tens of microseconds, against
+  a 104 ms message period at 9.6 Hz -- roughly 0.05% of it, while the detector
+  itself spends 31 ms/frame and the IVI's DetectionSmoother interpolates at
+  60 Hz regardless. Zero-copy pays off on megabyte payloads; this is not one.
+
+  Nothing heavy is affected, because this profile is scoped to appIVI alone via
+  FASTRTPS_DEFAULT_PROFILES_FILE in ivi-app.service. The bulk path --
+  rosbag2_player / the lidar driver feeding ~1.9 MB point clouds at ~19 MB/s
+  into cuda_pointpillars_node -- is root-to-root and keeps shared memory
+  untouched, as does the camera/YOLO pipeline. Publishers keep their default
+  transports; a participant that advertises only UDP locators is simply reached
+  over UDP, so nothing else on the board has to change.
+
+  REVISIT IF: appIVI ever subscribes to a point cloud or camera stream again
+  (the cloud subscription was deliberately removed -- see the long comment in
+  DriveView/src/ros_node.cpp). At megabyte payloads this tradeoff flips, and the
+  right answer becomes fixing the SHM permissions instead: give every publisher
+  AND this app UMask=0000 so the /dev/shm files land 0666. That was rejected
+  here because it is fragile -- the perception pipeline is often launched by
+  hand from a root shell, whose default umask 022 silently recreates root-owned
+  0644 ports and breaks the channel again.
+-->
+<dds xmlns="http://www.eprosima.com/XMLSchemas/fastRTPS_Profiles">
+  <profiles>
+    <transport_descriptors>
+      <transport_descriptor>
+        <transport_id>udp_only_tp</transport_id>
+        <type>UDPv4</type>
+      </transport_descriptor>
+    </transport_descriptors>
+
+    <participant profile_name="udp_only_participant" is_default_profile="true">
+      <rtps>
+        <userTransports>
+          <transport_id>udp_only_tp</transport_id>
+        </userTransports>
+        <!-- Without this, the builtin SHM+UDP pair is added back alongside
+             userTransports and the SHM locators reappear. -->
+        <useBuiltinTransports>false</useBuiltinTransports>
+      </rtps>
+    </participant>
+  </profiles>
+</dds>

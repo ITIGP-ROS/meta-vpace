@@ -1,0 +1,59 @@
+[Unit]
+Description=Nav2 navigation (planner, controller, behaviours, BT navigator)
+Documentation=file:/usr/share/ackermann_bringup/launch/nav2.launch.py
+
+# 🔴 NAVIGATION MUST START AFTER LOCALISATION, and this ordering is not cosmetic.
+# planner_server's global costmap has global_frame: map, and Costmap2DROS::activate()
+# blocks on canTransform(map, base_link) inside `while (rclcpp::ok() && ...)` -- a loop
+# that never times out. AMCL only publishes map->odom once it has a pose. Start nav2 first
+# and lifecycle_manager times out its change_state call, logs "Failed to bring up all
+# requested nodes. Aborting bringup." and leaves behavior_server, bt_navigator,
+# waypoint_follower and velocity_smoother NEVER ACTIVATED -- a stack that looks alive and
+# silently ignores every goal.
+#
+# nav2_amcl.yaml sets set_initial_pose: true so AMCL has a pose the moment it activates
+# and this ordering is sufficient unattended. The pose is a placeholder: the operator still
+# sets the true one (locate.py, or RViz) before driving. Being wrong there is safe --
+# nav2_bt.xml clears both costmaps at goal acceptance -- but being HALF-ACTIVATED is not
+# recoverable without a restart, which is what the ordering plus set_initial_pose prevents.
+Wants=ackermann-localization.service
+After=ackermann-localization.service
+
+StartLimitIntervalSec=300
+StartLimitBurst=3
+
+[Service]
+Type=simple
+Environment=HOME=/root
+
+ExecStart=/bin/sh -c '. /opt/ros/humble/setup.bash && exec ros2 launch ackermann_bringup nav2.launch.py'
+
+# 🔴 AUTOSTART CANNOT FINISH THIS STACK, so activate.py is not optional.
+# At the 0.05 m global costmap the Smac planner spends ~14 s inside configure() building
+# its Reeds-Shepp lookup table. That overruns the change_state service timeout, which is
+# HARDCODED in nav2_util::LifecycleServiceClient -- lifecycle_manager exposes only
+# autostart, bond_timeout and node_names, so there is no parameter to raise. Bringup
+# aborts even though every node configured perfectly. activate.py issues the remaining
+# transitions directly and exits non-zero unless controller_server, planner_server and
+# bt_navigator all reach active, so a stack that cannot accept goals fails the unit
+# instead of pretending to be up.
+#
+# The sleep covers node SPAWN only; activate.py carries its own generous per-transition
+# timeouts for the configure itself. It is a no-op on nodes that are already active, so it
+# costs nothing when lifecycle_manager did manage to finish.
+ExecStartPost=/bin/sh -c 'sleep 20; . /opt/ros/humble/setup.bash && exec python3 /opt/ros/humble/lib/ackermann_bringup/activate.py'
+
+KillSignal=SIGINT
+TimeoutStopSec=30
+# activate.py must be allowed to finish before systemd calls the start failed.
+TimeoutStartSec=180
+
+Restart=on-failure
+RestartSec=10
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=ackermann-navigation
+
+[Install]
+WantedBy=multi-user.target

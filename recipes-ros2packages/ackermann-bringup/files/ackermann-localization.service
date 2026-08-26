@@ -1,0 +1,36 @@
+[Unit]
+Description=Nav2 localisation (map_server + AMCL)
+Documentation=file:/usr/share/ackermann_bringup/launch/amcl.launch.py
+
+# AMCL needs /scan to do anything at all, and it needs odom->base_link from the EKF to
+# have a frame to correct. Wants= rather than Requires= so localisation retries rather
+# than being cancelled if either is briefly down.
+Wants=ackermann-lidar.service ackermann-drive.service
+After=ackermann-lidar.service ackermann-drive.service
+
+# amcl.launch.py defaults the map to /data/maps/home.yaml -- on the persistent partition,
+# because /opt is on the A/B rootfs and a flash replaces it.
+Requires=data-partition-mount.service
+After=data-partition-mount.service
+
+StartLimitIntervalSec=300
+StartLimitBurst=3
+
+[Service]
+Type=simple
+Environment=HOME=/root
+
+ExecStart=/bin/sh -c '. /opt/ros/humble/setup.bash && exec ros2 launch ackermann_bringup amcl.launch.py'
+
+KillSignal=SIGINT
+TimeoutStopSec=20
+
+Restart=on-failure
+RestartSec=5
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=ackermann-localization
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,54 @@
+[Unit]
+Description=Livox Mid-360 driver and pointcloud-to-laserscan
+Documentation=file:/usr/share/ackermann_bringup/launch/lidar.launch.py
+
+# After the drive stack, matching the order collection_stack.sh established: robot.launch
+# opens can0 first, then the lidar comes up. Wants=, not Requires=: the LiDAR is useful on
+# its own (mapping, perception, scan health checks) and there is no reason a drive-stack
+# failure should also deny you /scan.
+Wants=ackermann-drive.service
+After=ackermann-drive.service
+
+# 🔴 TWO LIVOX DRIVERS AT ONCE IS SILENT DATA CORRUPTION, NOT A CRASH.
+# The first instance holds the point-cloud UDP port and the second holds the IMU port, so
+# the stack publishes /livox/imu at a perfect 200 Hz and NO POINT CLOUD AT ALL, while every
+# log line looks healthy. One unit is one instance, which is what makes that unreachable
+# here -- it is the single most valuable thing this unit does.
+StartLimitIntervalSec=300
+StartLimitBurst=3
+
+[Service]
+Type=simple
+Environment=HOME=/root
+
+# The Mid-360 talks to a STATIC host address on the wired port. Without it the driver
+# logs "bind failed" and never receives a packet -- and that is the whole failure, there
+# is no retry inside the driver.
+#
+# ExecStartPre rather than a wait-online dependency: enP8p1s0 is NetworkManager-managed
+# (the static-eth connection), not systemd-networkd -- 10-eth-unmanaged.network exists
+# precisely to stop stock 80-wired.network running DHCP against it -- so
+# systemd-networkd-wait-online@enP8p1s0 would never report it configured. Restart=on-failure
+# below turns this into a retry loop until the LiDAR is plugged in and NM has configured
+# the port, which is the behaviour you want on a cold boot with the sensor still coming up.
+ExecStartPre=/bin/sh -c 'ip -4 addr show enP8p1s0 | grep -q "inet 192.168.1.5"'
+
+ExecStart=/bin/sh -c '. /opt/ros/humble/setup.bash && exec ros2 launch ackermann_bringup lidar.launch.py'
+
+# 🔴 THE LIVOX DRIVER DOES NOT DIE ON SIGTERM. A plain stop leaves it running, which is
+# exactly how the two-instance corruption above happens on the next start. systemd escalates
+# to SIGKILL after TimeoutStopSec and sweeps the whole cgroup, so the escalation
+# collection_stack.sh hand-rolled is handled here.
+KillSignal=SIGINT
+TimeoutStopSec=20
+KillMode=mixed
+
+Restart=on-failure
+RestartSec=10
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=ackermann-lidar
+
+[Install]
+WantedBy=multi-user.target

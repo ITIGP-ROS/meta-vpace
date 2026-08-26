@@ -40,9 +40,25 @@ FILES:${PN} += "${ros_libdir}/*.so"
 INSANE_SKIP:${PN} += "dev-so"
 
 # for swupdate (bundled by ackermann-update)
+#
+# --owner/--group rather than a fakeroot task: everything ros_ament_cmake puts in ${D} is
+# root-owned, but tar stamps the build user's uid into the archive unless told otherwise,
+# and the target's `tar xzf` then restores that into /opt/ros/humble. Marking do_deploy
+# fakeroot does not fix it -- bitbake.conf lists ${WORKDIR}/deploy- in PSEUDO_IGNORE_PATHS,
+# so the archive is written outside pseudo either way, and sstate's outhash then dies
+# looking uid 1000 up against the target passwd.
+# DEPLOYDIR rather than DEPLOY_DIR_IMAGE: that is what puts the tarball under sstate, so a
+# do_install sstate hit (which leaves ${D} empty) still yields a tarball.
+inherit deploy
 do_deploy() {
-    tar czf ${DEPLOY_DIR_IMAGE}/ackermann-hardware-${MACHINE}.tar.gz \
+    tar czf ${DEPLOYDIR}/ackermann-hardware-${MACHINE}.tar.gz \
+        --owner=root:0 --group=root:0 \
         --warning=no-file-changed \
         -C ${D} .
 }
-addtask deploy after do_install before do_build
+# after do_populate_sysroot/do_package, not just do_install: populate_sysroot hardlinks
+# ${D} into sysroot-destdir (cpio -pdl), bumping the ctime of every file it links. tar
+# re-stats each file after reading it and exits 1 when the ctime moved, so sharing the
+# slot fails the task at random -- and --warning=no-file-changed hides the message but
+# not the exit code.
+addtask deploy after do_install do_populate_sysroot do_package before do_build

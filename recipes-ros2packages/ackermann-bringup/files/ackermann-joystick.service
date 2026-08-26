@@ -1,0 +1,52 @@
+[Unit]
+Description=Manual override (joy_node + xbox_override, twist_mux priority 150)
+Documentation=file:/usr/share/ackermann_bringup/launch/teleop.launch.py
+
+# Start and stop with the pad, exactly as camera-sign-detect.service does with the camera.
+# 99-vpace-gamepad.rules tags the pad's input device and names it "gamepad", so this unit
+# binds to a stable device unit rather than an unstable /dev/input/eventN. BindsTo is what
+# stops the override when the pad is unplugged; without it a dead override would keep
+# holding, or fail to hold, the top twist_mux slot with no device behind it.
+BindsTo=dev-gamepad.device
+After=dev-gamepad.device
+
+# The override publishes /cmd_vel_teleop, which is only meaningful once twist_mux is
+# running to consume it. Wants=, not Requires=: a pad plugged in early should wait for the
+# drive stack, not fail.
+Wants=ackermann-drive.service
+After=ackermann-drive.service
+
+StartLimitIntervalSec=300
+StartLimitBurst=3
+
+[Service]
+Type=simple
+Environment=HOME=/root
+
+# NOTHING MOVES WHEN THIS STARTS. xbox_override refuses to engage until the operator
+# squeezes LT fully once (the ARM guard), because a trigger resting at the wrong value is
+# the most dangerous way a pad can fail -- over Bluetooth the trigger axes read 0.0 until
+# moved, and the (1-axis)/2 throttle transform reads 0.0 as HALF PRESSED. Auto-starting
+# this unit is therefore safe: it makes the vehicle ready to be armed, not armed.
+ExecStart=/bin/sh -c '. /opt/ros/humble/setup.bash && exec ros2 launch ackermann_bringup teleop.launch.py'
+
+# The real deadman is NOT here. The override publishes continuously at 20 Hz; if it dies,
+# the pad is unplugged or this unit is stopped, publication stops and the
+# ackermann_controller's reference_timeout (0.4 s) zeroes the wheels. twist_mux's own
+# timeout (0.5 s) only deselects the slot -- it never publishes a zero. So stopping this
+# unit stops the vehicle via the controller, within 0.4 s.
+KillSignal=SIGINT
+TimeoutStopSec=15
+
+Restart=on-failure
+RestartSec=5
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=ackermann-joystick
+
+# No [Install] section, deliberately -- same arrangement as camera-sign-detect.service.
+# 99-vpace-gamepad.rules starts this unit when a pad appears, and that covers boot as well
+# as a later hot-plug because systemd-udev-trigger replays add events for devices already
+# present. With no pad attached there is no device for joy_node to open, so it must never
+# be pulled in at boot.

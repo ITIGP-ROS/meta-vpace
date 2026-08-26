@@ -1,0 +1,25 @@
+# Stable name for the manual-override gamepad, and the start edge for the override.
+#
+# Matching on ID_INPUT_JOYSTICK rather than a vendor:product pair is deliberate. The pad
+# is used over BOTH USB and Bluetooth, and the two present different product IDs -- and
+# different axis layouts (USB: 8 axes, LT ax2 | BT: 6 axes, LT ax4). A VID:PID rule would
+# have to enumerate every pad that might be used and would silently fail to start on any
+# other. ID_INPUT_JOYSTICK is set by udev's builtin input_id for anything that presents
+# joystick axes, over either transport. xbox_override resolves the axis map itself from
+# the live /joy message, so the rule does not need to know which pad it matched.
+#
+# KERNEL=="event[0-9]*" restricts this to ONE match per pad. An input device presents
+# several nodes (eventN always, jsN when joydev is loaded); without this the rule fires
+# once per node and systemd is asked to start the unit repeatedly. The event node is the
+# right one to bind to because it exists regardless of whether joydev is loaded.
+#
+# TAG+="systemd" makes systemd create a .device unit for the pad AND alias it to every
+# DEVLINKS entry -- which is what gives dev-gamepad.device its name, the name
+# ackermann-joystick.service binds to. Dropping this tag would leave the override running
+# against a pad that is no longer there.
+#
+# SYSTEMD_WANTS is the start edge and it covers boot as well as a later hot-plug:
+# systemd-udev-trigger.service replays add events for devices already present. The unit
+# has no [Install] section, so this rule is the only thing that ever starts it.
+SUBSYSTEM=="input", KERNEL=="event[0-9]*", ENV{ID_INPUT_JOYSTICK}=="1", \
+    SYMLINK+="gamepad", TAG+="systemd", ENV{SYSTEMD_WANTS}="ackermann-joystick.service"

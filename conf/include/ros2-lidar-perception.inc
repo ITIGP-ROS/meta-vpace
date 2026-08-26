@@ -18,7 +18,7 @@ SRC_URI = "git://${ROS2_LIDAR_PERCEPTION_REPO};protocol=https;branch=${ROS2_LIDA
 # TensorRT PointPillars + C++ AB3DMOT, plus the CMake cross-compile fix that
 # lets cuda-pointpillars-ros.bb redirect TENSORRT_INCLUDE_DIRS/LIBRARY_DIRS and
 # CUDA_TOOLKIT_ROOT_DIR into the Yocto sysroot instead of the JetPack .deb paths.
-SRCREV = "ca03bae2d77aab4d102144d7123cdcfdee868410"
+SRCREV = "002f3c5815bd21a38fa8374b5ac4ab58341b8d3e"
 
 # One PV for all five, since they ship as one unit. Bump on behaviour changes,
 # not on every SRCREV move.

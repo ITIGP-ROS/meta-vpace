@@ -1,0 +1,48 @@
+#!/bin/sh
+# Is the drive actually reaching the wire?
+#
+# ExecStartPost for ackermann-drive.service. Exits non-zero if the vehicle cannot be
+# commanded, which fails the unit and lets Restart=on-failure cycle it -- the declarative
+# form of the retry loop ground_up.sh runs by hand.
+#
+# WHY NODE STATUS IS NOT ENOUGH
+# -----------------------------
+# ros2_control reports every controller "active" while the hardware component sits
+# UNCONFIGURED: write() is never called, no 0x100/0x120 frame reaches CAN, and the wheels
+# cannot move no matter what the gamepad does. Observed four times. It is caused by the
+# stack racing can0 at startup, and it is completely silent -- logs, lifecycle states and
+# `ros2 node list` all look healthy.
+#
+# Requires=systemd-networkd-wait-online@can0.service on the unit should prevent the race
+# outright, which is the real fix. This check stays because the failure is invisible and
+# the cost of missing it is a vehicle that looks ready and is not. Remove it only after
+# several clean cold boots have shown the ordering alone is sufficient.
+#
+# CAN tx is the only honest test.
+IFACE="${CAN_IFACE:-can0}"
+STAT="/sys/class/net/${IFACE}/statistics/tx_packets"
+MIN_FPS="${MIN_CAN_FPS:-40}"     # ground_up.sh's threshold; a configured stack streams ~120
+DEADLINE="${READY_TIMEOUT:-60}"  # controllers need ~12 s; allow for a slow first boot
+
+[ -r "$STAT" ] || { echo "ackermann-drive-ready: no $STAT -- is $IFACE up?" >&2; exit 1; }
+
+# Poll rather than sleep-once: the controllers are spawned by an event handler after
+# controller_manager starts, so the moment tx begins is not fixed.
+elapsed=0
+while [ "$elapsed" -lt "$DEADLINE" ]; do
+    a=$(cat "$STAT" 2>/dev/null) || a=0
+    sleep 3
+    b=$(cat "$STAT" 2>/dev/null) || b=0
+    fps=$(( (b - a) / 3 ))
+    if [ "$fps" -gt "$MIN_FPS" ]; then
+        echo "ackermann-drive-ready: CAN tx ${fps} fps -- hardware component configured, 0x100/0x120 streaming"
+        exit 0
+    fi
+    elapsed=$(( elapsed + 3 ))
+done
+
+echo "ackermann-drive-ready: CAN tx only ${fps} fps after ${DEADLINE}s." >&2
+echo "  The controllers may report active, but the hardware component never configured" >&2
+echo "  and write() is not being called. The vehicle CANNOT be commanded. Failing the" >&2
+echo "  unit so it is restarted rather than left looking healthy." >&2
+exit 1

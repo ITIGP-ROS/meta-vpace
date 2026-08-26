@@ -1,0 +1,70 @@
+[Unit]
+Description=Ackermann drive stack (ros2_control, EKF, twist_mux, emergency stop)
+Documentation=file:/usr/share/ackermann_bringup/launch/robot.launch.py
+
+# ⚠️ THIS UNIT MAKES THE VEHICLE LIVE AT POWER-ON.
+# Two consequences, both accepted deliberately:
+#   1. on_activate CENTRES THE STEERING. The front wheels pivot by themselves a few
+#      seconds after boot, with nobody warned. Keep hands clear of the linkage when
+#      powering the vehicle. Previously this was gated behind an operator running
+#      ground_up.sh, which printed a warning and waited 5 s.
+#   2. Once twist_mux and the controller are up the gamepad can move the car. The
+#      override still has to be ARMED by a full LT squeeze before anything moves, so
+#      "live" means "ready to be armed", not "armed".
+
+# THE can0 RACE -- the reason this unit exists at all.
+#
+# ros2_control reports every controller "active" while the hardware component sits
+# UNCONFIGURED: write() is never called, no 0x100/0x120 frame reaches the bus, and the
+# wheels cannot move. Observed four times. It happens when the stack comes up before can0
+# is configured, and NOTHING in the logs or lifecycle states shows it.
+#
+# Requires=, not Wants=: a can0 that never comes up must fail this unit loudly rather than
+# leave it running in that silent state. Same reasoning, and same stock unit, as
+# camera-sign-detect.service -- systemd-networkd-wait-online@.service is Type=oneshot with
+# RemainAfterExit=yes, so it costs nothing on later restarts. It only reaches "configured"
+# for can0 because can0.network declares RequiredForOnline=carrier; a CAN link never gets
+# an address and so never reaches wait-online's default minimum of "degraded".
+Requires=systemd-networkd-wait-online@can0.service
+After=systemd-networkd-wait-online@can0.service
+
+# hardware.yaml and the controller params are read from /opt, but the map default and
+# other state live on /data, and localisation downstream depends on it being mounted.
+Requires=data-partition-mount.service
+After=data-partition-mount.service
+
+# Starting a second drive stack over a running one duplicates twist_mux,
+# emergency_stop_server, road_classification_node and twist_stamper. Measured: that
+# degraded /livox/imu from 200 Hz to 11.86 Hz. One unit is one instance by construction,
+# which is the whole reason this replaces collection_stack.sh's process scanning.
+StartLimitIntervalSec=300
+StartLimitBurst=3
+
+[Service]
+Type=simple
+# rclpy wants a writable HOME for its log directory. Same as update-coordinator.service.
+Environment=HOME=/root
+
+ExecStart=/bin/sh -c '. /opt/ros/humble/setup.bash && exec ros2 launch ackermann_bringup robot.launch.py'
+
+# Node status lies about this; CAN tx does not. See the script.
+# With Type=simple the unit is not "started" until this exits, so a stack that came up
+# uncommandable fails the unit and Restart=on-failure cycles it.
+ExecStartPost=/usr/bin/ackermann-drive-ready
+
+# ros2 launch tears its nodes down cleanly on SIGINT; the default SIGTERM leaves them to
+# the cgroup sweep. Same as camera-sign-detect.service.
+KillSignal=SIGINT
+# Longer than the camera's 20 s: this stack has a controller_manager and spawners to
+# unwind, and the Livox driver in the companion unit ignores SIGTERM entirely.
+TimeoutStopSec=30
+
+Restart=on-failure
+RestartSec=5
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=ackermann-drive
+
+[Install]
+WantedBy=multi-user.target

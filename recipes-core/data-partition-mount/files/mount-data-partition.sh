@@ -102,4 +102,25 @@ if mountpoint -q "$DATA_MNT"; then
     # something to reject.
     mkdir -p "$DATA_MNT/ota"
     chmod 0700 "$DATA_MNT/ota"
+
+    # --- Nav2 maps ---------------------------------------------------------
+    # amcl.launch.py defaults map to /data/maps/home.yaml rather than the copy
+    # inside the package. The reason is the same one that puts everything else
+    # in this block here: /opt is on the A/B rootfs and a flash replaces it,
+    # while a surveyed map is field work that should outlive the image. On a
+    # freshly flashed board with an empty /data that default would point at
+    # nothing, so seed it from the packaged copies.
+    #
+    # COPY ONLY WHAT IS MISSING, never overwrite. A map in /data is either the
+    # same file we shipped or a NEWER survey of the same building made with
+    # map_run.sh -- in both cases the copy on disk is the one to keep. cp -n
+    # rather than a plain cp is the whole point of this block; without it every
+    # boot would silently discard a re-survey.
+    if [ -d /opt/ros/humble/share/ackermann_bringup/maps ]; then
+        mkdir -p "$DATA_MNT/maps"
+        chmod 0755 "$DATA_MNT/maps"
+        cp -n /opt/ros/humble/share/ackermann_bringup/maps/*.yaml \
+              /opt/ros/humble/share/ackermann_bringup/maps/*.pgm \
+              "$DATA_MNT/maps/" 2>/dev/null || true
+    fi
 fi

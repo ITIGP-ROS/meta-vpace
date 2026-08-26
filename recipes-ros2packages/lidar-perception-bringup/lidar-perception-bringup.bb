@@ -21,17 +21,22 @@ S = "${WORKDIR}/git/src/lidar_perception_bringup"
 
 SYSTEMD_SERVICE:${PN} = "lidar-perception.service"
 
-# Not enabled at boot, deliberately.
+# Enabled 2026-08-26, now that the precondition this was waiting on is met.
 #
-# livox-ros-driver2 has NO systemd unit in this layer, so nothing publishes
-# /livox/lidar unless someone starts the driver by hand. Auto-enabling this
-# would load a PointPillars engine onto the GPU at every boot and then sit
-# waiting on a topic that never arrives -- GPU memory held, journal quiet, no
-# indication anything is wrong.
+# It shipped disabled because livox-ros-driver2 had NO systemd unit: nothing published
+# /livox/lidar unless someone started the driver by hand, so auto-enabling would have
+# loaded a PointPillars engine onto the GPU at every boot and then sat waiting on a topic
+# that never arrived -- GPU memory held, journal quiet, no indication anything was wrong.
 #
-# Flip to "enable" the moment the Livox driver gets a unit to order against
-# (and add the corresponding After=/Requires= to lidar-perception.service).
-SYSTEMD_AUTO_ENABLE = "disable"
+# ackermann-bringup now ships ackermann-lidar.service, and lidar-perception.service carries
+# Requires=/After= against it, so the engine is only loaded once there is a publisher to
+# feed it.
+SYSTEMD_AUTO_ENABLE = "enable"
+
+# The unit this orders against lives in ackermann-bringup. Without it systemd would refuse
+# to start this one at all (Requires= on a missing unit is a hard failure), so the coupling
+# is declared rather than left to the image to satisfy by accident.
+RDEPENDS:${PN} += "ackermann-bringup"
 
 ROS_BUILD_DEPENDS = " \
     ament-cmake-native \

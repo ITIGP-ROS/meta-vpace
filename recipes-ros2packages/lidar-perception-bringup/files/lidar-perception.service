@@ -7,6 +7,20 @@ Documentation=file:/opt/ros/humble/share/lidar_perception_bringup/launch/percept
 # without naming the unit -- and keeps working if the mount ever moves.
 RequiresMountsFor=/data
 
+# The Livox driver now has a unit, so this can finally be ordered against it. Before
+# ackermann-lidar.service existed, nothing published /livox/lidar unless a person started
+# the driver by hand -- which is why this unit shipped disabled: enabling it would have
+# loaded a PointPillars engine onto the GPU at every boot and then sat waiting on a topic
+# that never arrived, holding GPU memory with a quiet journal and no sign anything was
+# wrong.
+#
+# Requires=, not Wants=: that silent wait is exactly the state worth failing loudly on. If
+# the LiDAR never comes up, holding a TensorRT engine open serves nobody, and
+# ackermann-lidar.service has its own ExecStartPre on the sensor's static host address so
+# it fails rather than hangs when the sensor is absent.
+Requires=ackermann-lidar.service
+After=ackermann-lidar.service
+
 # First start on a fresh slot builds a TensorRT engine, which takes minutes on
 # an Orin and is pure GPU work. A crash loop there is expensive, so give up
 # after 3 attempts in 10 minutes rather than thrash.

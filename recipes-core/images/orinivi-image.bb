@@ -115,7 +115,7 @@ IMAGE_INSTALL:append = " can-utils kernel-module-can kernel-module-mttcan kernel
 # USB camera kernel module
 IMAGE_INSTALL:append = " kernel-module-uvcvideo "
 # Stable /dev/camera-front symlink (the Brio moves between /dev/videoN across replugs)
-IMAGE_INSTALL:append = " camera-udev-rules "
+IMAGE_INSTALL:append = " camera-udev-rules gamepad-udev-rules "
 # Disable the Tegra Security Engine crypto driver -- it oopses and the CCPLEX
 # watchdog then resets the board. See recipes-support/tegra-se-blacklist/.
 IMAGE_INSTALL:append = " tegra-se-blacklist "

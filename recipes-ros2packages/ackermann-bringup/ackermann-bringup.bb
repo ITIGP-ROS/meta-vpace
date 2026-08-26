@@ -15,7 +15,7 @@ SRC_URI = "\
     file://ackermann-joystick.service \
     file://ackermann-drive-ready \
 "
-SRCREV = "6fd27aede834fe8a8006fc8d9c5efbced4eaed74"
+SRCREV = "c4f7dae30d0f265cd685e233d27d8140f62ecf57"
 
 S = "${WORKDIR}/git/src/ackermann_bringup"
 

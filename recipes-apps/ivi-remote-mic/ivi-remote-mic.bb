@@ -1,13 +1,8 @@
 SUMMARY = "Virtual microphone for the IVI head unit, fed from a remote machine over RTP"
-DESCRIPTION = "This board has no audio capture hardware at all -- /proc/asound/pcm lists \
-no capture device, /dev/snd holds only HDMI playback PCMs, and there is no snd-usb-audio \
-module -- so the IVI app's Vosk speech recognition has nothing to listen to. This creates \
-a PulseAudio null sink whose monitor becomes the default capture source, and decodes an \
-Opus/RTP stream into it, so a laptop's microphone becomes the head unit's microphone. \
-\
-Opus over UDP rather than raw audio over an SSH pipe because the link is usually WiFi: \
-TCP cannot discard stale audio, so packet loss turns into unbounded, permanent latency \
-drift, while RTP with a jitter buffer drops late packets and stays current."
+DESCRIPTION = "This board has no audio capture hardware, so Vosk has nothing to listen \
+to. Creates a PulseAudio null sink and decodes an Opus/RTP stream into it, so a \
+laptop's mic becomes the head unit's mic. Opus/UDP rather than an SSH pipe because \
+TCP can't discard stale audio and RTP's jitter buffer can."
 LICENSE = "CLOSED"
 
 PV = "1.0"
@@ -29,38 +24,12 @@ inherit systemd
 SYSTEMD_SERVICE:${PN} = "ivi-remote-mic.service"
 SYSTEMD_AUTO_ENABLE = "enable"
 
-# Depend on the individual PLUGIN packages, not the gstreamer1.0-plugins-{base,good}
-# umbrellas. Those umbrellas only pull their plugins in with RRECOMMENDS, so depending
-# on them is a soft dependency: it happens to work on a normal image (recommends are
-# installed by default) and silently loses elements under NO_RECOMMENDATIONS or a
-# trimmed build. The failure mode is a restart-looping service complaining "no element
-# opusdec", which is a long way from "your image dropped a recommendation".
-#
-# pulseaudio-server        -> pactl specifically. pulseaudio.inc lists ${bindir}/pactl
-#                             under -server, not -misc, which is easy to get backwards.
-# gstreamer1.0             -> gst-launch-1.0
-# ...-base-opus            -> opusdec        <- see the note below
-# ...-base-audioconvert    -> audioconvert
-# ...-base-audioresample   -> audioresample
-# ...-good-udp             -> udpsrc
-# ...-good-rtp             -> rtpopusdepay
-# ...-good-rtpmanager      -> rtpjitterbuffer
-# ...-good-pulseaudio      -> pulsesink
-#
-# NOTE: gstreamer1.0-plugins-base-opus only EXISTS if gst-plugins-base was built with
-# the 'opus' PACKAGECONFIG, which is not in poky's default set -- conf/distro/vpace.conf
-# turns it on. If that line is ever dropped this recipe stops building rather than
-# producing an image that fails at runtime, which is the point of naming it here.
-# pulseaudio-module-remap-source is NOT optional. Without it the virtual mic is only a
-# null-sink monitor, which PulseAudio and GStreamer report as device.class="monitor" --
-# and Qt filters monitor-class devices out of QMediaDevices::audioInputs(), so the IVI
-# app reports "No audio device detected" and never opens a stream. The remap source
-# reports device.class="filter" instead, which Qt accepts. See the note in
-# files/ivi-remote-mic.
-#
-# Poky splits all 68 PulseAudio modules into their own packages (do_split_packages in
-# pulseaudio.inc), and only a handful land in a default image -- this one has to be
-# asked for by name. No PulseAudio rebuild is involved.
+# Individual plugin packages, not the gstreamer1.0-plugins-{base,good} umbrellas --
+# those only pull plugins in via RRECOMMENDS, a soft dependency that silently drops
+# under NO_RECOMMENDATIONS. gstreamer1.0-plugins-base-opus needs the 'opus'
+# PACKAGECONFIG, turned on in conf/distro/vpace.conf. pulseaudio-module-remap-source
+# is required, not optional: without it Qt filters out the monitor-class device and
+# the app reports "No audio device detected" -- see files/ivi-remote-mic.
 RDEPENDS:${PN} = "\
     pulseaudio-server \
     pulseaudio-module-remap-source \
@@ -82,10 +51,9 @@ do_install() {
     install -m 0644 ${S}/ivi-remote-mic.service \
         ${D}${systemd_system_unitdir}/ivi-remote-mic.service
 
-    # The sender runs on the DEVELOPER'S machine, not here. It is shipped so it travels
-    # with the image and can be copied off with scp; deliberately not in ${bindir},
-    # because running it on the Jetson would only stream the Jetson's own (nonexistent)
-    # microphone back to itself.
+    # Runs on the developer's machine, not here -- shipped so it travels with the
+    # image and can be scp'd off. Not in ${bindir}: running it on the Jetson would
+    # just stream its own nonexistent mic back to itself.
     install -d ${D}${datadir}/ivi-remote-mic
     install -m 0755 ${S}/ivi-remote-mic-send \
         ${D}${datadir}/ivi-remote-mic/ivi-remote-mic-send

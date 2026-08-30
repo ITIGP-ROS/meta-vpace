@@ -12,62 +12,28 @@ if ! mountpoint -q "$DATA_MNT"; then
     mount "$DATA_MNT"
 fi
 
-# ---------------------------------------------------------------------------
-# STATE THAT MUST NOT LIVE ON THE ROOTFS
+# State that must not live on the rootfs, since SWUpdate replaces the A/B pair
+# wholesale on every flash: secoc/ (SecOC freshness counters, must survive a flash
+# or CAN peers reject our frames), network/ (NM's learned WiFi profiles), ota/ (the
+# installed-version record; losing it defeats the downgrade gate).
 #
-# The rootfs is the A/B pair nvme0n1p1/p2 that SWUpdate replaces wholesale, so
-# anything under /etc or /var is gone on every flash. Two kinds of state break
-# badly when that happens, and both are rooted here instead:
-#
-#   secoc/    SecOC freshness counters. The peers on the CAN bus (the QNX
-#             cluster and the ESP32 body ECU) keep counting across OUR flash.
-#             If ours reset, our frames are rejected -- and the rejection is
-#             logged on the OTHER processor, so on this box it presents as
-#             "the OTA request just never gets approved", with nothing in our
-#             own journal to explain it.
-#
-#   network/  NetworkManager's learned WiFi profiles and its state directory,
-#             so a reflashed board rejoins the last network it was on instead
-#             of needing a keyboard and a monitor.
-#
-#   ota/      The OTA agent's record of which version is installed -- one file,
-#             shared by the IVI app and ackermann payload channels. Lose it and
-#             the board reports its INITIAL_VERSION floor instead: it reinstalls
-#             the campaign it is already running (holding the vehicle while it
-#             does), and the ALLOW_DOWNGRADE gate stops rejecting replayed old
-#             packages, which is the one attack swupdate's signature check does
-#             not cover.
-#
-# EVERYTHING BELOW IS GUARDED ON THE MOUNT HAVING ACTUALLY SUCCEEDED. Creating
-# these under an unmounted /data writes them to the rootfs directory hiding
-# beneath the mount point, which looks like it works and then silently loses
-# every value on the next flash -- the exact failure this arrangement exists to
-# prevent. A guard that is skipped is worse than no guard at all here.
-#
-# Plain mkdir/chmod rather than `install -d`: this runs before local-fs.target
-# on a BusyBox userland, and mkdir is the option that is certain to be there.
-# ---------------------------------------------------------------------------
+# Everything below is guarded on the mount having actually succeeded -- creating
+# these under an unmounted /data writes them to the rootfs dir hiding beneath the
+# mount point, which looks fine until the next flash silently loses it all.
 if mountpoint -q "$DATA_MNT"; then
     # --- SecOC freshness ---------------------------------------------------
     mkdir -p "$DATA_MNT/secoc/update_coordinator"
     chmod 0755 "$DATA_MNT/secoc"
     chmod 0700 "$DATA_MNT/secoc/update_coordinator"
 
-    # wifi_cred_send is launched by the IVI head-unit app, which runs as
-    # `weston`, not root -- so this one file has to be group/owner writable by
-    # it while the directory above stays root-owned.
-    #
-    # Pre-created EMPTY on purpose: load_last_fv()'s fscanf fails on an empty
-    # file and returns 0, and next_freshness() then falls back to Unix time,
-    # which is exactly how a never-provisioned box has always behaved.
+    # Owned by weston (the IVI app's user), not root -- unlike the dir above.
+    # Pre-created empty: load_last_fv()'s fscanf fails on empty and falls back
+    # to Unix time, matching a never-provisioned box's normal behavior.
     if [ ! -e "$DATA_MNT/secoc/wifi_cred_txfv" ]; then
         : > "$DATA_MNT/secoc/wifi_cred_txfv"
     fi
-    # Do NOT swallow a chown failure here. A root-owned store leaves weston
-    # unable to write it, wifi_cred_send prints one warning to a stderr nobody
-    # is reading, and the send still SUCCEEDS -- so the counter quietly stops
-    # advancing and nothing looks wrong until a receiver starts rejecting us.
-    # This runs under systemd, so the message lands in the journal.
+    # Don't swallow a chown failure: a root-owned file here lets the freshness
+    # counter silently stop advancing while wifi_cred_send still reports success.
     if ! chown weston:weston "$DATA_MNT/secoc/wifi_cred_txfv"; then
         echo "mount-data-partition: WARNING: chown weston failed on" \
              "$DATA_MNT/secoc/wifi_cred_txfv - the IVI app cannot persist" \
@@ -76,17 +42,10 @@ if mountpoint -q "$DATA_MNT"; then
     chmod 0664 "$DATA_MNT/secoc/wifi_cred_txfv"
 
     # --- NetworkManager ----------------------------------------------------
-    # 0700 is NOT cosmetic: NetworkManager silently ignores any keyfile that is
-    # readable or writable by a user or group other than root, because they
-    # hold WiFi PSKs in the clear. A looser mode here means saved networks stop
-    # being loaded with no error worth finding.
-    #
-    # nm-state is bind-mounted over /var/lib/NetworkManager by a drop-in on
-    # NetworkManager.service. It carries `timestamps` (which network was last
-    # used -- the tie-break that decides WHICH saved profile autoconnects) and
-    # `seen-bssids` (how hidden SSIDs are found at all). Persisting the
-    # profiles without this directory keeps the passwords but loses the
-    # preference order.
+    # 0700: NetworkManager silently ignores keyfiles readable/writable by
+    # anyone but root, since they hold WiFi PSKs in the clear. nm-state is
+    # bind-mounted over /var/lib/NetworkManager by a service drop-in and holds
+    # the autoconnect preference order, separate from the saved credentials.
     mkdir -p "$DATA_MNT/network/system-connections"
     mkdir -p "$DATA_MNT/network/nm-state"
     chmod 0700 "$DATA_MNT/network" \
@@ -94,28 +53,15 @@ if mountpoint -q "$DATA_MNT"; then
                "$DATA_MNT/network/nm-state"
 
     # --- OTA installed version ---------------------------------------------
-    # Only the directory -- the OPPOSITE of the wifi_cred_txfv treatment above.
-    # There, an empty file is exactly equivalent to a missing one. Here it is
-    # not: a version file is either a valid semver or it is absent, and
-    # ivi_ota_agent.sh runs as root and writes it itself after a successful
-    # install. Pre-creating an empty one would only give installed_version()
-    # something to reject.
+    # Directory only, not the file itself -- unlike wifi_cred_txfv above, an
+    # empty version file would just be rejected; ivi_ota_agent.sh writes it.
     mkdir -p "$DATA_MNT/ota"
     chmod 0700 "$DATA_MNT/ota"
 
     # --- Nav2 maps ---------------------------------------------------------
-    # amcl.launch.py defaults map to /data/maps/home.yaml rather than the copy
-    # inside the package. The reason is the same one that puts everything else
-    # in this block here: /opt is on the A/B rootfs and a flash replaces it,
-    # while a surveyed map is field work that should outlive the image. On a
-    # freshly flashed board with an empty /data that default would point at
-    # nothing, so seed it from the packaged copies.
-    #
-    # COPY ONLY WHAT IS MISSING, never overwrite. A map in /data is either the
-    # same file we shipped or a NEWER survey of the same building made with
-    # map_run.sh -- in both cases the copy on disk is the one to keep. cp -n
-    # rather than a plain cp is the whole point of this block; without it every
-    # boot would silently discard a re-survey.
+    # amcl.launch.py defaults to /data/maps/home.yaml, so seed it from the
+    # packaged copy on a fresh /data. cp -n (never overwrite) is the point --
+    # a map already in /data may be a newer field survey worth keeping.
     if [ -d /opt/ros/humble/share/ackermann_bringup/maps ]; then
         mkdir -p "$DATA_MNT/maps"
         chmod 0755 "$DATA_MNT/maps"

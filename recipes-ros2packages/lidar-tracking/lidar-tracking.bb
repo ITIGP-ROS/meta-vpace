@@ -1,26 +1,11 @@
 DESCRIPTION = "C++ AB3DMOT 3D multi-object tracker used by the LiDAR perception pipeline"
 MAINTAINER = "Youhana Beshay <youhanabeshay@gmail.com>"
 
-# NOT MIT, whatever package.xml claims.
-#
-# src/lidar_tracking/LICENSE is the AB3DMOT software licence agreement:
-# "ACADEMIC OR NON-PROFIT ORGANIZATION NONCOMMERCIAL RESEARCH USE ONLY". The
-# package.xml says MIT, and the two cannot both be true. Declaring MIT here
-# would put MIT into the image licence manifest -- i.e. it would make the
-# product's stated legal position a copy of the wrong one of two contradictory
-# files, silently.
-#
-# So this declares what is actually in the tree and lets the manifest tell the
-# truth. Nothing filters on it today (the distro sets no INCOMPATIBLE_LICENSE),
-# so this does not block a build; it makes the problem visible instead of
-# burying it. Resolve it upstream by either
-#
-#   * confirming the C++ port is an independent implementation of the published
-#     algorithm, deleting the inherited LICENSE file, and keeping MIT; or
-#   * obtaining a commercial grant from the AB3DMOT authors; or
-#   * accepting the non-commercial restriction on the shipped product.
-#
-# Once that is settled, change LICENSE/LIC_FILES_CHKSUM here to match.
+# NOT MIT, despite package.xml: src/lidar_tracking/LICENSE is AB3DMOT's
+# non-commercial research-only license, which contradicts it. Declared honestly
+# here rather than papering over it with MIT in the image manifest. Resolve by
+# either confirming an independent implementation, getting a commercial grant
+# from AB3DMOT, or accepting the non-commercial restriction -- then update this.
 LICENSE = "AB3DMOT-academic"
 LIC_FILES_CHKSUM = "file://LICENSE;md5=766784d0874f614f972829e741f07f7a"
 NO_GENERIC_LICENSE[AB3DMOT-academic] = "LICENSE"

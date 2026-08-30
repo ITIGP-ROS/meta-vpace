@@ -2,78 +2,32 @@
 # weston-force-output — give Weston an output to render into with no panel plugged in,
 # at 2x the resolution the IVI app is actually designed for.
 #
-# WHY THIS IS NEEDED
+# With nothing plugged into HDMI, weston finds no output and exits 1 (needed because
+# remote-display mirrors a real DRM output rather than the RDP backend directly, see
+# weston-rdp.ini). Fixed by installing a synthetic EDID advertising 2048x1200 as
+# preferred, then forcing the connector's sysfs status to "connected" to re-probe it.
 #
-# The remote-display config mirrors a real DRM output rather than using the RDP
-# backend directly (see the long note in weston-rdp.ini for why). But with nothing
-# plugged into the HDMI port, weston finds no output at all and exits 1:
+# 2048x1200, not 1024x600: weston-rdp.ini sets [output] scale=2 so Qt keeps its
+# 1024x600 logical layout but renders 4x the pixels for a sharper RDP mirror --
+# 2048x1200 is exactly 2x in both dimensions so the scale divides back cleanly.
 #
-#     DRM: head 'DP-1' found, connector 66 is disconnected.
+# EDID, not an [output] mode= line: without an EDID the kernel falls back to
+# 1024x768, and mode= alone can't select a resolution the connector doesn't already
+# report. A full [output] modeline would also wrongly override a real panel's own
+# timing, whereas overriding just the EDID only affects the connector we're forcing.
 #
-# and systemd reports only "status=1/FAILURE" with no explanation, because weston's
-# own log goes to the session scope rather than weston.service.
-#
-# Two steps, in this order:
-#
-#   1. Install a synthetic EDID advertising 2048x1200 as the preferred mode.
-#   2. Write "on" to the connector's sysfs status, which forces detection to report
-#      connected and triggers a re-probe that picks the EDID up.
-#
-# WHY 2048x1200 AND NOT 1024x600
-#
-# The IVI QML is laid out for 1024x600 logical pixels -- that has not changed. But
-# weston-rdp.ini now sets `[output] scale=2` on this connector, which tells Qt to
-# render at 2x device-pixel-ratio while keeping the *logical* window size at 1024x600
-# (so the QML layout, positions and proportions are untouched -- no reflow). For that
-# to actually produce a sharper image over RDP rather than just a bigger one, the
-# connector's real physical mode has to BE 2048x1200: exactly 2x 1024x600 in both
-# dimensions, so scale=2 divides it back to exactly 1024x600 logical with no rounding
-# or aspect distortion. See weston-rdp.ini and the screen-share.c patch in the `weston`
-# bbappend for the other two-thirds of this -- Weston's screen-share.so used to throw
-# the extra resolution away before it ever reached RDP; that's now patched to keep it.
-#
-# WHY THE EDID AND NOT AN [output] MODE LINE
-#
-# Forcing the connector without an EDID gives you the kernel's fallback mode list --
-# 1024x768, 800x600, 640x480 -- and weston takes 1024x768. Pinning it with
-# `[output] mode=2048x1200` in weston.ini DOES NOT WORK either: a bare WxH only
-# selects from modes the connector already reports, and 2048x1200 is not among the
-# fallbacks. Weston silently keeps 1024x768.
-#
-# A full modeline in [output] would work, but that section would also apply when a REAL
-# panel is attached, forcing our synthetic CVT timing onto hardware that has its own.
-# Overriding the EDID instead is precisely scoped: it only touches a connector we are
-# already forcing, so a genuinely connected panel keeps its own EDID, its own timing and
-# its own preferred mode.
-#
-# NOT YET VERIFIED ON HARDWARE. The blob below was generated from `cvt 2048 1200 60`
-# (matching how the original 1024x600 one was made -- `cvt 1024 600 60` reproduces that
-# blob's modeline exactly), then independently decoded back out of the finished bytes to
-# confirm it round-trips to the same modeline and that the whole-block checksum is
-# correct. What was NOT done is booting it: the first real test needs to confirm weston
-# actually reports "2048x1200@..., preferred, current" the way the 1024x600 version was
-# once confirmed to (see git history for that original bench note). If the debugfs
-# override is rejected for some reason specific to this mode, the fallback below is the
-# same as before: 1024x768 from the kernel's default list.
+# Not yet verified on hardware: the EDID blob round-trips correctly (decoded back to
+# confirm the modeline and checksum), but hasn't been confirmed booting on real
+# hardware yet. Falls back to 1024x768 if the debugfs override is rejected.
 set -e
 
 log() { echo "[weston-force-output] $*"; }
 
-# EDID 1.3, 128 bytes, one detailed timing descriptor holding the standard CVT mode:
+# EDID 1.3, 128 bytes, one detailed timing descriptor (bytes 54-71) holding the
+# standard CVT mode `cvt 2048 1200 60`; byte 127 is the whole-block checksum.
 #
-#     Modeline  205.25  2048 2184 2400 2752  1200 1203 1213 1245  -hsync +vsync
-#
-# Layout: 0-7 header | 8-17 vendor/product/serial/date | 18-19 version 1.3 |
-# 20-24 digital input, size, gamma, features | 25-34 chromaticity |
-# 35-37 established (none) | 38-53 standard (none) | 54-71 DETAILED TIMING (the mode) |
-# 72-125 three string descriptors | 126 extensions=0 | 127 checksum (whole block sums to 0).
-#
-# To retarget a different mode, regenerate rather than hand-editing: the detailed
-# timing block and the checksum both have to change together. This one was built by
-# taking `cvt 2048 1200 60`'s Modeline, packing it into the 18-byte detailed-timing
-# descriptor per the VESA EDID layout (verified against this file's own previous
-# 1024x600 blob, which decodes byte-for-byte to `cvt 1024 600 60`'s output), splicing
-# it into bytes 54-71 below, and recomputing byte 127 so the whole block sums to 0.
+# To retarget a different mode, regenerate rather than hand-edit -- the timing
+# block and checksum have to change together.
 EDID_HEX=$(printf '%s' '
     00ffffff ffffff00 5a030100 01000000
     01240103 800f0978 0aee91a3 544c9926
@@ -85,19 +39,9 @@ EDID_HEX=$(printf '%s' '
     00666f72 6365640a 20202020 20200018
 ' | tr -d '[:space:]')
 
-# Materialise the blob and install it.
-#
-# TWO STEPS, and the second one matters: the kernel's edid_override handler wants the
-# whole EDID delivered in a SINGLE write(), and rejects anything else with EINVAL.
-# BusyBox printf chunks its output, so writing straight to the override fails:
-#
-#     printf ... > edid_override   ->  rc=1, "printf: write error: Invalid argument"
-#     cat blob   > edid_override   ->  rc=0
-#
-# So printf builds the blob in a temp file (BusyBox here has no xxd, but its printf
-# does understand \xNN), and dd then delivers it as one 128-byte write. Errors are
-# deliberately NOT sent to /dev/null -- hiding them is what made this look like a
-# missing debugfs mount rather than a rejected write.
+# Two steps because the kernel's edid_override handler requires the whole EDID in a
+# single write() (EINVAL otherwise), and BusyBox printf chunks its output -- so printf
+# builds the blob in a temp file and dd delivers it as one write.
 write_edid() {   # <override-path>
     _tmp="/tmp/.weston-edid.$$"
     _esc=$(printf '%s' "$EDID_HEX" | sed 's/../\\x&/g')
@@ -161,29 +105,14 @@ done
 # nothing, which is the correct outcome.
 log "done ($_forced connector(s) forced)"
 
-# ---------------------------------------------------------------------------
-# Tell ivi-app.service what device-pixel-ratio to render the QML at.
+# Tell ivi-app.service what device-pixel-ratio to render at: Main.qml is fixed at
+# 1024x600, so on the synthetic 2048x1200 output it needs QT_SCALE_FACTOR=2 to keep
+# that layout while filling the real buffer (client-side, since [output] scale=2
+# doesn't work correctly on this weston+kiosk-shell+NVIDIA stack -- see weston-rdp.ini).
 #
-# The IVI's Main.qml is a fixed ApplicationWindow { width: 1024; height: 600 }
-# with fixed-pixel fonts and icons, so its layout is only correct when QML's
-# logical viewport is exactly 1024x600. kiosk-shell fullscreens the app to the
-# whole output, which makes that viewport (output width / QT_SCALE_FACTOR).
-# So on the synthetic 2048x1200 output the app must render at factor 2: same
-# 1024x600 layout, but into a real 2048x1200 buffer -- 4x the pixels for the
-# RDP mirror to carry, which is the whole point of the oversized EDID above.
-#
-# Weston's own `[output] scale=2` is the textbook way to do this and does NOT
-# work on this weston 13.0.1 + kiosk-shell + NVIDIA stack (the client ends up
-# placed 1:1 in the top-left quarter of the output, rest black -- see
-# weston-rdp.ini). Driving it from the client side keeps the compositor at
-# scale=1 and avoids that path entirely.
-#
-# Keyed off the connector's ACTUAL resulting mode rather than "did this run
-# install the EDID", because this unit re-runs on every weston start and the
-# second run finds the connector already forced-on, skips it at the
-# "really connected" check above, and installs nothing -- while the mode is
-# still very much 2048x1200. Reading the mode is correct on every path,
-# including the write_edid failure above that leaves us on 1024x768.
+# Keyed off the connector's actual mode, not whether this run installed the EDID --
+# on a second weston start the connector is already forced-on and skipped above,
+# but the mode is still 2048x1200.
 _scale_env=/run/ivi-scale.env
 _mode_w=0
 for _modes in /sys/class/drm/card*-*/modes; do

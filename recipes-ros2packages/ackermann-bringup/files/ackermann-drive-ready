@@ -5,20 +5,11 @@
 # commanded, which fails the unit and lets Restart=on-failure cycle it -- the declarative
 # form of the retry loop ground_up.sh runs by hand.
 #
-# WHY NODE STATUS IS NOT ENOUGH
-# -----------------------------
-# ros2_control reports every controller "active" while the hardware component sits
-# UNCONFIGURED: write() is never called, no 0x100/0x120 frame reaches CAN, and the wheels
-# cannot move no matter what the gamepad does. Observed four times. It is caused by the
-# stack racing can0 at startup, and it is completely silent -- logs, lifecycle states and
-# `ros2 node list` all look healthy.
-#
-# Requires=systemd-networkd-wait-online@can0.service on the unit should prevent the race
-# outright, which is the real fix. This check stays because the failure is invisible and
-# the cost of missing it is a vehicle that looks ready and is not. Remove it only after
-# several clean cold boots have shown the ordering alone is sufficient.
-#
-# CAN tx is the only honest test.
+# Node status isn't enough: ros2_control can report every controller "active" while
+# the hardware component sits UNCONFIGURED (can0 startup race), with no CAN frames
+# ever reaching the wire and nothing in the logs or lifecycle states showing it.
+# Requires=systemd-networkd-wait-online@can0.service should prevent the race itself;
+# this stays as a belt-and-suspenders check since the failure is otherwise silent.
 IFACE="${CAN_IFACE:-can0}"
 STAT="/sys/class/net/${IFACE}/statistics/tx_packets"
 MIN_FPS="${MIN_CAN_FPS:-40}"     # ground_up.sh's threshold; a configured stack streams ~120

@@ -2,29 +2,11 @@
 Description=Ackermann drive stack (ros2_control, EKF, twist_mux, emergency stop)
 Documentation=file:/usr/share/ackermann_bringup/launch/robot.launch.py
 
-# ⚠️ THIS UNIT MAKES THE VEHICLE LIVE AT POWER-ON.
-# Two consequences, both accepted deliberately:
-#   1. on_activate CENTRES THE STEERING. The front wheels pivot by themselves a few
-#      seconds after boot, with nobody warned. Keep hands clear of the linkage when
-#      powering the vehicle. Previously this was gated behind an operator running
-#      ground_up.sh, which printed a warning and waited 5 s.
-#   2. Once twist_mux and the controller are up the gamepad can move the car. The
-#      override still has to be ARMED by a full LT squeeze before anything moves, so
-#      "live" means "ready to be armed", not "armed".
+# This unit makes the vehicle live at power-on: on_activate centres the steering
+# a few seconds after boot with no warning (keep hands clear of the linkage).
 
-# THE can0 RACE -- the reason this unit exists at all.
-#
-# ros2_control reports every controller "active" while the hardware component sits
-# UNCONFIGURED: write() is never called, no 0x100/0x120 frame reaches the bus, and the
-# wheels cannot move. Observed four times. It happens when the stack comes up before can0
-# is configured, and NOTHING in the logs or lifecycle states shows it.
-#
-# Requires=, not Wants=: a can0 that never comes up must fail this unit loudly rather than
-# leave it running in that silent state. Same reasoning, and same stock unit, as
-# camera-sign-detect.service -- systemd-networkd-wait-online@.service is Type=oneshot with
-# RemainAfterExit=yes, so it costs nothing on later restarts. It only reaches "configured"
-# for can0 because can0.network declares RequiredForOnline=carrier; a CAN link never gets
-# an address and so never reaches wait-online's default minimum of "degraded".
+# Requires=, not Wants=: if can0 isn't configured yet when this starts,
+# ros2_control silently reports "active" with the hardware left UNCONFIGURED.
 Requires=systemd-networkd-wait-online@can0.service
 After=systemd-networkd-wait-online@can0.service
 
@@ -33,10 +15,8 @@ After=systemd-networkd-wait-online@can0.service
 Requires=data-partition-mount.service
 After=data-partition-mount.service
 
-# Starting a second drive stack over a running one duplicates twist_mux,
-# emergency_stop_server, road_classification_node and twist_stamper. Measured: that
-# degraded /livox/imu from 200 Hz to 11.86 Hz. One unit is one instance by construction,
-# which is the whole reason this replaces collection_stack.sh's process scanning.
+# A duplicate drive stack degrades other topics (measured /livox/imu 200Hz ->
+# 11.86Hz); one unit enforces single-instance instead of process scanning.
 StartLimitIntervalSec=300
 StartLimitBurst=3
 

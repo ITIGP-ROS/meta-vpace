@@ -14,8 +14,10 @@ SRC_URI = "\
     file://ackermann-navigation.service \
     file://ackermann-joystick.service \
     file://ackermann-drive-ready \
+    file://ackermann-drive-watchdog \
+    file://ackermann-drive-watchdog.service \
 "
-SRCREV = "c4f7dae30d0f265cd685e233d27d8140f62ecf57"
+SRCREV = "20deeab4c5e8959cc1a2b09a201f7ecdfcf3abaa"
 
 S = "${WORKDIR}/git/src/ackermann_bringup"
 
@@ -98,18 +100,15 @@ SYSTEMD_SERVICE:${PN} = "\
     ackermann-localization.service \
     ackermann-navigation.service \
     ackermann-joystick.service \
+    ackermann-drive-watchdog.service \
 "
-# The four ordered units are pulled in at boot by their own [Install] sections, so the
-# vehicle comes up drivable and with Nav2 idle and ready for a goal.
-# ackermann-joystick.service is the exception and has NO [Install]: 99-vpace-gamepad.rules
-# starts it when a pad appears. Listing it here still installs and registers the unit --
-# enabling is what the rule replaces. Same arrangement as camera-sign-detect-bringup.bb.
+# The ordered units enable via their own [Install] sections. ackermann-joystick.service
+# is the exception: it has no [Install], since 99-vpace-gamepad.rules starts it when a
+# pad appears instead. Same arrangement as camera-sign-detect-bringup.bb.
 SYSTEMD_AUTO_ENABLE = "enable"
 
-# 99-vpace-gamepad.rules is what starts ackermann-joystick.service, and its
-# SYMLINK+="gamepad" is what gives that unit's BindsTo= a stable device name. Installed
-# apart from this package the unit would never start; installed here without the unit the
-# rule would name a service that does not exist.
+# 99-vpace-gamepad.rules' SYMLINK+="gamepad" gives the joystick unit's BindsTo= a
+# stable device name -- both halves are required for it to ever start.
 RDEPENDS:${PN} += "gamepad-udev-rules"
 
 FILES:${PN} += "\
@@ -118,29 +117,27 @@ FILES:${PN} += "\
     ${systemd_system_unitdir}/ackermann-localization.service \
     ${systemd_system_unitdir}/ackermann-navigation.service \
     ${systemd_system_unitdir}/ackermann-joystick.service \
+    ${systemd_system_unitdir}/ackermann-drive-watchdog.service \
     ${bindir}/ackermann-drive-ready \
+    ${bindir}/ackermann-drive-watchdog \
 "
 
 do_install:append() {
     install -d ${D}${systemd_system_unitdir}
     for u in ackermann-drive ackermann-lidar ackermann-localization \
-             ackermann-navigation ackermann-joystick; do
+             ackermann-navigation ackermann-joystick ackermann-drive-watchdog; do
         install -m 0644 ${UNPACKDIR}/$u.service ${D}${systemd_system_unitdir}/$u.service
     done
     install -d ${D}${bindir}
     install -m 0755 ${UNPACKDIR}/ackermann-drive-ready ${D}${bindir}/ackermann-drive-ready
+    install -m 0755 ${UNPACKDIR}/ackermann-drive-watchdog ${D}${bindir}/ackermann-drive-watchdog
 }
 
 # for swupdate (bundled by ackermann-update)
 #
-# --owner/--group rather than a fakeroot task: everything ros_ament_cmake puts in ${D} is
-# root-owned, but tar stamps the build user's uid into the archive unless told otherwise,
-# and the target's `tar xzf` then restores that into /opt/ros/humble. Marking do_deploy
-# fakeroot does not fix it -- bitbake.conf lists ${WORKDIR}/deploy- in PSEUDO_IGNORE_PATHS,
-# so the archive is written outside pseudo either way, and sstate's outhash then dies
-# looking uid 1000 up against the target passwd.
-# DEPLOYDIR rather than DEPLOY_DIR_IMAGE: that is what puts the tarball under sstate, so a
-# do_install sstate hit (which leaves ${D} empty) still yields a tarball.
+# --owner/--group, not fakeroot: PSEUDO_IGNORE_PATHS excludes ${WORKDIR}/deploy-,
+# so fakeroot wouldn't fix the uid stamped into the tarball anyway. DEPLOYDIR (not
+# DEPLOY_DIR_IMAGE) puts this under sstate.
 inherit deploy
 do_deploy() {
     tar czf ${DEPLOYDIR}/ackermann-bringup-${MACHINE}.tar.gz \
@@ -148,9 +145,7 @@ do_deploy() {
         --warning=no-file-changed \
         -C ${D} .
 }
-# after do_populate_sysroot/do_package, not just do_install: populate_sysroot hardlinks
-# ${D} into sysroot-destdir (cpio -pdl), bumping the ctime of every file it links. tar
-# re-stats each file after reading it and exits 1 when the ctime moved, so sharing the
-# slot fails the task at random -- and --warning=no-file-changed hides the message but
-# not the exit code.
+# After do_populate_sysroot too: it hardlinks ${D}, bumping ctimes, and tar
+# fails at random if a ctime moves mid-read. --warning hides the message, not
+# the exit code.
 addtask deploy after do_install do_populate_sysroot do_package before do_build

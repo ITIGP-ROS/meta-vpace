@@ -21,21 +21,12 @@ S = "${WORKDIR}/git/src/lidar_perception_bringup"
 
 SYSTEMD_SERVICE:${PN} = "lidar-perception.service"
 
-# Enabled 2026-08-26, now that the precondition this was waiting on is met.
-#
-# It shipped disabled because livox-ros-driver2 had NO systemd unit: nothing published
-# /livox/lidar unless someone started the driver by hand, so auto-enabling would have
-# loaded a PointPillars engine onto the GPU at every boot and then sat waiting on a topic
-# that never arrived -- GPU memory held, journal quiet, no indication anything was wrong.
-#
-# ackermann-bringup now ships ackermann-lidar.service, and lidar-perception.service carries
-# Requires=/After= against it, so the engine is only loaded once there is a publisher to
-# feed it.
+# Enabled 2026-08-26 now that ackermann-lidar.service exists to publish /livox/lidar --
+# previously auto-enabling would've loaded a PointPillars engine onto the GPU at every
+# boot with nothing to feed it. lidar-perception.service Requires=/After= that unit.
 SYSTEMD_AUTO_ENABLE = "enable"
 
-# The unit this orders against lives in ackermann-bringup. Without it systemd would refuse
-# to start this one at all (Requires= on a missing unit is a hard failure), so the coupling
-# is declared rather than left to the image to satisfy by accident.
+# Declared explicitly since Requires= on a missing unit is a hard systemd failure.
 RDEPENDS:${PN} += "ackermann-bringup"
 
 ROS_BUILD_DEPENDS = " \

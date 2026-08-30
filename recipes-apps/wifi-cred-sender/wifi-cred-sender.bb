@@ -21,18 +21,10 @@ SRC_URI = "\
 UNPACKDIR ?= "${WORKDIR}"
 S = "${UNPACKDIR}"
 
-# The freshness counter lives at /data/secoc/wifi_cred_txfv (compiled into
-# wifi_cred_send.cpp as the default, overridable with -F).
-#
-# It is NOT staged from this recipe, and there is no FVDIR any more. /data is
-# nvme0n1p15, a mount point — anything installed into it at image build time is
-# hidden the moment the partition mounts and would never be seen. The file and
-# its weston ownership are created at boot by mount-data-partition.sh, which is
-# also the only place that can check the mount actually succeeded.
-#
-# It lives there rather than under /var/lib because it must survive a FLASH,
-# not merely a reboot: the rootfs is the A/B pair SWUpdate replaces, while the
-# QNX cluster and the ESP32 keep their own freshness floors across it.
+# The freshness counter (/data/secoc/wifi_cred_txfv, overridable with -F) is not
+# staged from this recipe -- /data is a mount point, so anything staged here would
+# be hidden once it mounts. Created at boot by mount-data-partition.sh instead,
+# and lives on /data (not /var/lib) because it must survive a flash, not just a reboot.
 
 do_compile() {
     ${CC} ${CFLAGS} -c -o aes_cmac.o ${S}/aes_cmac.c

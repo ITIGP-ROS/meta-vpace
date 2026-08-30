@@ -36,31 +36,16 @@ IMAGE_INSTALL:append = " \
 # --- IVI ---
 IMAGE_INSTALL:append = " ivi "
 
-# Mirrors the head unit over RDP on :3389, ON BY DEFAULT, so the board can be driven
-# with no panel attached. The compositor stays on the DRM backend, so the app still
-# renders Quick3D on the GPU. Idle cost is ~35% of one core with nobody connected and
-# no frame-rate loss; a connected viewer costs ~2 cores and takes 60 fps to 52.
-# Disable per board with `weston-remote-display off`.
-#
-# NOTE: the RDP backend does NO authentication. Anyone who can reach port 3389 gets
-# full control of the head unit. Drop this line for a build that must not expose it.
+# Mirrors the head unit over RDP on :3389, on by default (`weston-remote-display off`
+# to disable). No authentication -- anyone reaching port 3389 gets full control.
 IMAGE_INSTALL:append = " weston-remote-display "
 
-# Virtual microphone, ON BY DEFAULT. This board has no audio capture hardware at all, so
-# the IVI app's Vosk recognition has nothing to listen to; this decodes an Opus/RTP
-# stream from a developer's laptop into a PulseAudio null sink whose monitor is the
-# default capture source. Sender script ships at
-# /usr/share/ivi-remote-mic/ivi-remote-mic-send — copy it to the laptop.
-#
-# NOTE: this listens on UDP 5004 with no authentication, and what arrives is fed to the
-# VOICE COMMAND path — a step beyond the RDP exposure above, which only lets someone
-# watch. Drop this line for a build that must not accept audio from the network.
+# Virtual mic, on by default: this board has no capture hardware, so this decodes an
+# Opus/RTP stream from a laptop into a PulseAudio null sink for Vosk. Listens on UDP
+# 5004 with no authentication, feeding the voice command path directly.
 IMAGE_INSTALL:append = " ivi-remote-mic "
 
-# Auto-mounts a USB-connected phone (MTP) at the gvfs-shaped path the IVI app already
-# looks for, so its media browser picks it up with no app changes. Pulls in simple-mtpfs
-# and libmtp. Idle cost is nothing — a udev rule and a template unit that only runs while
-# a phone is attached.
+# Auto-mounts a USB phone (MTP) at the gvfs-shaped path the IVI app already looks for.
 IMAGE_INSTALL:append = " ivi-mtp-mount "
 
 # Touch support
@@ -82,29 +67,17 @@ IMAGE_INSTALL:append = " networkmanager-nmcli "
 
 #  WiFi kernel module and firmware
 #
-# Two radios are supported: the MT7601U USB dongle and the Intel 8265 M.2 card. Both sets
-# of modules are installed unconditionally so the image boots with WiFi whichever one is
-# fitted -- the unused driver costs a probe that finds no device.
-#
-# The kernel fragments (linux-jammy-nvidia-tegra_5.15.bbappend) already set CONFIG_IWLWIFI=m
-# and CONFIG_IWLMVM=m, so the modules were being BUILT and packaged all along; they simply
-# were not in IMAGE_INSTALL, which left the 8265 sitting on the PCI bus with driver=NONE and
-# no wireless interface at all. A kernel fragment enables a build, it does not install it.
+# Both the MT7601U USB dongle and Intel 8265 M.2 card are installed unconditionally
+# so the image boots with WiFi whichever is fitted -- the unused driver just probes
+# and finds nothing. The kernel fragment enables these builds but doesn't install
+# them, so they still need to be listed explicitly here.
 IMAGE_INSTALL:append = " kernel-module-mt7601u linux-firmware-mt7601u "
 IMAGE_INSTALL:append = " kernel-module-iwlwifi kernel-module-iwlmvm linux-firmware-iwlwifi-8265 "
 
-# Bluetooth for the Intel 8265. The BT half of the card is a USB function (8087:0a2b), not
-# PCIe, so it needs the USB HCI transport rather than anything on the PCI side.
-#
-# ALL FOUR MODULES ARE REQUIRED -- btrtl and btbcm are NOT optional here despite the card
-# being Intel. btusb is compiled with CONFIG_BT_HCIBTUSB_RTL=y and CONFIG_BT_HCIBTUSB_BCM=y,
-# so it references btrtl_setup_realtek/btrtl_shutdown_realtek and the btbcm symbols
-# unconditionally at load time. Ship btusb without btrtl and modprobe fails outright with
-# "Unknown symbol btrtl_setup_realtek" -- the Intel radio never appears, and the error names
-# a Realtek symbol, which sends you looking in the wrong place entirely.
-#
-# ibt-12-16 is the correct firmware for the 8265 specifically (the .sfi is the operational
-# image, the .ddc the tuning parameters); the 8260 takes ibt-11-5 and the 7265 ibt-hw-37-8.
+# Bluetooth for the Intel 8265 (USB HCI, not PCIe). All four modules are required --
+# btusb references btrtl/btbcm symbols unconditionally at load time even on this
+# Intel card, so dropping either fails modprobe with a misleading Realtek error.
+# ibt-12-16 is the 8265-specific firmware (8260 takes ibt-11-5, 7265 ibt-hw-37-8).
 IMAGE_INSTALL:append = " kernel-module-btusb kernel-module-btintel kernel-module-btrtl kernel-module-btbcm "
 IMAGE_INSTALL:append = " linux-firmware-ibt-12-16 "
 # bluetoothd policy. bluez5 ships no main.conf, so without this the adapter is DOWN
@@ -163,33 +136,12 @@ IMAGE_INSTALL:append = " \
 
 # --- TensorRT dev tools (ONNX -> TRT engine conversion on device) ---
 #
-# NVIDIA requires TensorRT engines be built ON THE TARGET, so an x86 build host cannot produce
-# them -- and until now neither could the Jetson, because tensorrt-core ships libnvinfer but no
-# ONNX parser. That blocked all TensorRT work. With the parser present we ship a portable .onnx
-# and let the device build and cache its own engine on first boot, which also removes a real
-# failure mode: a prebuilt .engine is bound to an exact TensorRT version and stops loading
-# silently if the image moves to a different L4T.
+# TensorRT engines must be built on-target; tensorrt-plugins-prebuilt is what brings
+# the ONNX parser (libnvonnxparser) needed for that. Two gotchas: trtexec lands at
+# /usr/src/tensorrt/bin/trtexec, not on $PATH; and the unversioned libnvonnxparser.so
+# symlink is in the -dev package, needed for anything compiling against it on-device.
 #
-# tensorrt-plugins-prebuilt is what carries libnvonnxparser.so.10.3.0 (plus .so.10 and .so).
-# It also brings libnvinfer_plugin, which CUDA-PointPillars does NOT need -- that registers its
-# pillar-scatter plugin from inside its own binary via REGISTER_TENSORRT_PLUGIN -- but the two
-# ship in the same package.
-#
-# TWO THINGS THAT WILL OTHERWISE COST SOMEONE AN AFTERNOON:
-#
-#   * trtexec IS NOT ON $PATH. tensorrt-trtexec-prebuilt sets FILES:${PN} to
-#     ${prefix}/src/tensorrt/bin, so it lands at /usr/src/tensorrt/bin/trtexec.
-#
-#   * The UNVERSIONED libnvonnxparser.so symlink goes to the -dev package, per the default
-#     FILES_SOLIBSDEV. Runtime is fine -- the SONAME is libnvonnxparser.so.10, which is in the
-#     runtime package -- but anything COMPILING against -lnvonnxparser on the device also needs
-#     tensorrt-plugins-prebuilt-dev.
-#
-# No PREFERRED_PROVIDER needed here: meta-tegra's tegra-common.inc already pins
-# tensorrt-plugins and tensorrt-trtexec to the -prebuilt recipes, so the source-built
-# tensorrt-plugins under meta-tegra/external/openembedded-layer/ does not collide.
-#
-# This image is TensorRT 10.3.0.30 (libnvinfer.so.10.3.0), NOT 8.6.
+# This image is TensorRT 10.3.0.30, not 8.6.
 IMAGE_INSTALL:append = " \
     tensorrt-trtexec-prebuilt \
     tensorrt-plugins-prebuilt \

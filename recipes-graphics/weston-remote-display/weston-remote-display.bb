@@ -1,15 +1,8 @@
 SUMMARY = "Mirror the IVI head unit over RDP, without giving up GPU rendering"
-DESCRIPTION = "Ships a second Weston configuration that keeps the compositor on the \
-DRM backend -- so the IVI app keeps rendering Qt Quick3D on the Jetson GPU -- and \
-mirrors that output to a nested RDP compositor. Adds a per-device TLS credential \
-generator, a DRM connector forcer so there is an output with no panel attached, and \
-an on/off switch. Inert until `weston-remote-display on` is run: the production path \
-is the default and is not modified. \
-\
-Serving the RDP backend DIRECTLY was tried first and does not work on this hardware: \
-the compositor comes up on the GPU but NVIDIA's surfaceless EGL display cannot hand \
-buffers to clients, so every GL client dies with EGL_BAD_ALLOC. See the note at the \
-top of weston-rdp.ini."
+DESCRIPTION = "Ships a second Weston config that mirrors the DRM-backed compositor to \
+a nested RDP compositor, keeping Qt Quick3D on the GPU. Adds a TLS cert generator, a \
+DRM connector forcer for headless boards, and an on/off switch. Serving RDP directly \
+was tried first and fails on this hardware (EGL_BAD_ALLOC) -- see weston-rdp.ini."
 LICENSE = "CLOSED"
 
 PV = "1.0"
@@ -37,29 +30,16 @@ inherit systemd
 
 SYSTEMD_SERVICE:${PN} = "weston-rdp-tls.service weston-headless-output.service \
                          weston-rdp-reset.service"
-# Neither is auto-enabled, and they do not need to be: the vendor drop-in's Wants=
-# starts them as dependencies of weston.service, and Wants= works whether or not a
-# unit is enabled. Enabling them here as well would just start them twice at boot.
-# Masking the drop-in with `weston-remote-display off` correctly takes them out of
-# the picture too, which would not happen if they were enabled independently.
-#
-# weston-rdp-reset.service is disabled for a different reason: it is a oneshot started
-# on demand by the NetworkManager dispatcher hook when the WiFi address changes. There
-# is nothing for it to do at boot, and enabling it would restart weston on every boot.
+# Not auto-enabled: the vendor drop-in's Wants= starts them as weston.service
+# dependencies regardless, and masking that drop-in via `off` correctly takes them
+# out too. weston-rdp-reset.service is separately a oneshot triggered on demand by
+# the NM dispatcher hook, not something to run at every boot.
 SYSTEMD_AUTO_ENABLE = "disable"
 
-# weston   -> the compositor, plus screen-share.so and fullscreen-shell.so
-#             (${libdir}/weston/*.so, in the weston package) and rdp-backend.so
-#             (${libdir}/libweston-13/, in libweston-13, which weston depends on).
-#             Two PACKAGECONFIGs have to be on for those to exist: 'rdp', pinned in
-#             conf/distro/vpace.conf, and 'screenshare', which is already in poky's
-#             default PACKAGECONFIG for weston. Neither failure is loud -- weston
-#             starts fine and the mirror simply never appears -- so
-#             `weston-remote-display on` checks for the listener and says so.
-# openssl  -> weston-rdp-gen-cert calls the openssl CLI. Poky's openssl recipe has no
-#             -bin split (PACKAGES =+ "libcrypto libssl openssl-conf ..."), so
-#             ${bindir}/openssl lands in the main package -- the same dependency
-#             ivi-ota-agent already relies on for its pkeyutl/base64 work.
+# weston needs PACKAGECONFIG 'rdp' and 'screenshare' on for rdp-backend.so and
+# screen-share.so to exist -- neither failure is loud, so `on` checks the listener.
+# openssl: weston-rdp-gen-cert calls the CLI, which is in the main package (no
+# -bin split in poky's recipe).
 RDEPENDS:${PN} = "weston openssl"
 
 do_install() {
@@ -82,24 +62,16 @@ do_install() {
     install -m 0644 ${S}/weston-rdp-reset.service \
         ${D}${systemd_system_unitdir}/weston-rdp-reset.service
 
-    # The dispatcher hook goes in the READ-ONLY dispatcher directory, not /etc -- the
-    # same call nm-config.bb makes for static-eth.nmconnection. NetworkManager reads
-    # both, and an image-provided script belongs in the one runtime never edits.
-    #
-    # 0755 root:root is REQUIRED, not tidiness: NetworkManager silently ignores
-    # dispatcher scripts that are not executable or that are group/other-writable.
-    #
-    # No RDEPENDS on networkmanager on purpose. The hook is inert without it -- the
-    # directory simply goes unread -- and coupling recipes-graphics to
-    # recipes-connectivity for a no-op file is not worth it.
+    # Read-only dispatcher dir, not /etc -- same call nm-config.bb makes for
+    # static-eth.nmconnection. 0755 root:root is required: NM ignores dispatcher
+    # scripts that aren't executable or are group/other-writable. No RDEPENDS on
+    # networkmanager -- the hook is just inert without it.
     install -d ${D}${nonarch_libdir}/NetworkManager/dispatcher.d
     install -m 0755 ${S}/50-weston-rdp-reset \
         ${D}${nonarch_libdir}/NetworkManager/dispatcher.d/50-weston-rdp-reset
 
-    # The vendor drop-in. THIS is what makes remote display on by default -- it
-    # re-points weston.service at weston-rdp.ini. `weston-remote-display off` masks it
-    # with a same-named file under ${sysconfdir}/systemd/system rather than editing or
-    # deleting this one, so the package's own files are never touched at runtime.
+    # The vendor drop-in that makes remote display on by default. `off` masks it
+    # with a same-named /etc file rather than editing this one.
     install -d ${D}${systemd_system_unitdir}/weston.service.d
     install -m 0644 ${S}/weston-remote-display.conf \
         ${D}${systemd_system_unitdir}/weston.service.d/10-remote-display.conf

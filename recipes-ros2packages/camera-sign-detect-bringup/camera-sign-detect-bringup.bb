@@ -57,12 +57,9 @@ EXTRA_OECMAKE += "${@bb.utils.contains('PACKAGECONFIG', 'trt', '-DCAMERA_SIGN_DE
 DEPENDS = "${ROS_BUILD_DEPENDS}"
 RDEPENDS:${PN} = "${ROS_EXEC_DEPENDS} ${@bb.utils.contains('PACKAGECONFIG', 'trt', 'ros2-yolos-cpp-trt', 'ros2-yolos-cpp', d)}"
 
-# 99-vpace-camera.rules is what starts camera-sign-detect.service, and its
-# SYMLINK+="camera-front" is what gives the unit's BindsTo= a stable device name to bind
-# to. Installed apart from this package the unit would never start; installed here
-# without the unit the rule would name a service that does not exist. Both are already
-# in orinivi-image.bb -- this makes the coupling explicit so it survives a slimmer image.
-# camera_params.yaml also hardcodes /dev/camera-front, so the rule is required either way.
+# 99-vpace-camera.rules' SYMLINK+="camera-front" gives the unit's BindsTo= a stable
+# device name; camera_params.yaml also hardcodes /dev/camera-front. Declared
+# explicitly so the coupling survives a slimmer image.
 RDEPENDS:${PN} += "camera-udev-rules"
 
 FILES_SOLIBSDEV = ""

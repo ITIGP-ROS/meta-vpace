@@ -1,0 +1,32 @@
+[Unit]
+Description=Drive-stack watchdog (CAN tx liveness -> restart if uncommandable)
+Documentation=file:/usr/bin/ackermann-drive-watchdog
+
+# Follows the drive stack rather than requiring it: if the stack is stopped deliberately
+# the watchdog should idle, not fight it. The script itself checks is-active before
+# judging anything.
+Wants=ackermann-drive.service
+After=ackermann-drive.service
+
+# A watchdog that thrashes is worse than none. If it somehow keeps dying, stay down.
+StartLimitIntervalSec=600
+StartLimitBurst=5
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/ackermann-drive-watchdog
+
+# WATCHDOG_ACTION=alarm turns this into detection-only: it logs that the vehicle is
+# uncommandable and leaves the restart to a human. Use that if an operator is always
+# present and an unexpected steering re-centre would be a surprise.
+#Environment=WATCHDOG_ACTION=alarm
+
+Restart=always
+RestartSec=10
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=ackermann-drive-watchdog
+
+[Install]
+WantedBy=multi-user.target

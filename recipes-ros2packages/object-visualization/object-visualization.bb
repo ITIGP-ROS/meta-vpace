@@ -16,13 +16,9 @@ S = "${WORKDIR}/git/src/object_visualization"
 
 ROS_BUILD_DEPENDS = ""
 
-# rclpy is deliberately listed here even though package.xml does NOT declare it.
-# object3d_visualizer_node.py imports rclpy on its first line, so a target
-# without it gets an ImportError the moment the node starts -- and because the
-# launch file runs the visualiser as a plain Node, that failure would show up as
-# a dead visualiser next to a perfectly healthy detector, which reads like a
-# marker/RViz problem rather than a missing package. The right long-term fix is
-# to add <exec_depend>rclpy</exec_depend> to package.xml upstream.
+# rclpy listed here even though package.xml doesn't declare it -- the node imports
+# it on its first line, so without this it's an ImportError that looks like an
+# RViz/marker problem. Should be added to package.xml upstream instead.
 ROS_EXEC_DEPENDS = " \
     rclpy \
     geometry-msgs \

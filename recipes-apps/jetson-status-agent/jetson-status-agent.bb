@@ -1,11 +1,7 @@
 SUMMARY = "Jetson status agent: publishes CPU/GPU/memory/thermal health to the log feed"
-DESCRIPTION = "Samples /proc and the Tegra sysfs nodes and publishes this board's \
-health onto the vehicle's Adafruit IO log feed (<user>/feeds/logs) as ID:A2, in the \
-same five-field line the ESP32 and the Cluster guest use. One data point a minute \
-(CODE:63 SYS SUMMARY, which carries the legacy CODE:58 and CODE:60 words as its two \
-halves; --split sends the old pair instead), plus edge-triggered thermal, disk and \
-WiFi-address events. Credentials come from ivi-ota-agent's /etc/ivi-ota/agent.conf; \
-there is no second copy of the key."
+DESCRIPTION = "Samples /proc and Tegra sysfs and publishes this board's health onto \
+the vehicle's Adafruit IO log feed as ID:A2, one point a minute plus edge-triggered \
+thermal/disk/WiFi events. Credentials come from ivi-ota-agent's agent.conf."
 LICENSE = "CLOSED"
 LIC_FILES_CHKSUM = ""
 
@@ -27,15 +23,9 @@ inherit systemd
 SYSTEMD_SERVICE:${PN} = "jetson-status-agent.service"
 SYSTEMD_AUTO_ENABLE = "enable"
 
-# mosquitto-clients -> mosquitto_pub, which is how this publishes. No MQTT library
-#                      is linked; the binary spawns the tool, exactly as busmon does
-#                      on the Cluster. ivi-ota-agent already pulls this in, so on a
-#                      normal image it costs nothing.
-# ivi-ota-agent     -> NOT a dependency. The agent reads its /etc/ivi-ota/agent.conf
-#                      if it is there and exits with a clear message if it is not, so
-#                      the two can be installed independently. Adding a hard RDEPENDS
-#                      here would drag the whole OTA stack onto a board that only
-#                      wanted telemetry.
+# Publishes via mosquitto_pub (spawned, no MQTT library linked), same as busmon on
+# the Cluster. No RDEPENDS on ivi-ota-agent: it reads agent.conf if present and
+# exits cleanly if not, so telemetry-only boards don't need the whole OTA stack.
 RDEPENDS:${PN} = "mosquitto-clients"
 
 do_compile() {

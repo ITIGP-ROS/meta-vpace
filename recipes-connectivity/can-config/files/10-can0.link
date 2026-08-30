@@ -1,0 +1,19 @@
+# Kernel transmit queue depth for can0.
+#
+# .link, not .network: TransmitQueueLength= is a systemd.link(5) option and is
+# silently ignored if placed in can0.network.
+#
+# Raised from the default of 10: too shallow, and a brief ENOBUFS burst got
+# misread by ros2_control as bus-off, silently deactivating the hardware.
+#
+# 32, not 1000: a late frame is worse than a dropped one on this real-time
+# channel; 32 frames (~7ms @ 500kbit/s) is enough headroom without buffering
+# stale commands.
+#
+# Secondary fix only -- see CAN_WRITE_CONGESTION_LIMIT in ackermann_system.hpp
+# for the actual fix (ENOBUFS is congestion, not bus-off).
+[Match]
+OriginalName=can0
+
+[Link]
+TransmitQueueLength=32

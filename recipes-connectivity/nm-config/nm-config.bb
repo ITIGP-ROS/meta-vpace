@@ -16,10 +16,8 @@ RDEPENDS:${PN} += " \
     networkmanager \
 "
 
-# The learned-WiFi store and NetworkManager's state directory both live under
-# /data, and the directories are created at boot by mount-data-partition.sh --
-# /data is a mount point, so nothing staged into it at image build time would
-# ever be visible.
+# /data is a mount point -- its directories are created at boot by
+# mount-data-partition.sh, not staged here.
 RDEPENDS:${PN} += " \
     data-partition-mount \
 "
@@ -36,18 +34,9 @@ do_install() {
     install -d ${D}${systemd_unitdir}/network
     install -m 0644 ${WORKDIR}/10-eth-unmanaged.network ${D}${systemd_unitdir}/network/
 
-    # static-eth goes in the READ-ONLY profile directory, not /etc.
-    #
-    # 20-keyfile-path.conf repoints the writable store at /data, and `path`
-    # REPLACES /etc/NetworkManager/system-connections rather than adding to it
-    # -- a profile left in /etc after that would silently stop being read, and
-    # the LiDAR link would go dead with no error. NetworkManager always reads
-    # ${nonarch_libdir}/NetworkManager/system-connections regardless of `path`,
-    # and it is the conventional home for a profile that ships with the image
-    # instead of being learned on the box.
-    #
-    # 0600 is required: NetworkManager ignores keyfiles that are readable or
-    # writable by any user or group other than root.
+    # static-eth goes in the read-only profile dir, not /etc: 20-keyfile-path.conf
+    # repoints the writable store at /data, so a profile left in /etc would
+    # silently stop being read. 0600 since NetworkManager ignores looser keyfiles.
     install -d ${D}${nonarch_libdir}/NetworkManager/system-connections
     install -m 0600 ${WORKDIR}/static-eth.nmconnection \
         ${D}${nonarch_libdir}/NetworkManager/system-connections/

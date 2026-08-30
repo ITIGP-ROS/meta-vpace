@@ -1,0 +1,57 @@
+#!/bin/sh
+# Is the vehicle still commandable? Restart the drive stack if it silently stopped being so.
+#
+# ackermann-drive-ready only gates startup, not a later ENOBUFS regression where
+# controllers keep reporting active but CAN tx silently drops. This polls CAN tx
+# as the only honest signal and restarts the stack (re-centres steering) once
+# the vehicle is confirmed uncommandable. WATCHDOG_ACTION=alarm to log only.
+IFACE="${CAN_IFACE:-can0}"
+STAT="/sys/class/net/${IFACE}/statistics/tx_packets"
+MIN_FPS="${MIN_CAN_FPS:-20}"        # healthy idles at ~61; the failure sits at ~1
+PERIOD="${WATCHDOG_PERIOD:-30}"     # seconds between samples
+NEEDED="${WATCHDOG_STRIKES:-2}"     # consecutive bad samples before acting
+COOLDOWN="${WATCHDOG_COOLDOWN:-90}" # after a restart, let the stack settle
+ACTION="${WATCHDOG_ACTION:-restart}"
+
+strikes=0
+
+# Let the drive stack finish its own startup before judging it. ackermann-drive-ready can
+# take up to 60 s on a slow first boot, and sampling during that window would read a
+# not-yet-streaming interface as a failure.
+sleep "$COOLDOWN"
+
+while true; do
+    if ! systemctl is-active --quiet ackermann-drive.service; then
+        # Not our problem: systemd's own Restart= handles a dead unit. We only care about
+        # the case where the unit is alive and the vehicle is not.
+        strikes=0
+        sleep "$PERIOD"
+        continue
+    fi
+
+    a=$(cat "$STAT" 2>/dev/null) || a=0
+    sleep 3
+    b=$(cat "$STAT" 2>/dev/null) || b=0
+    fps=$(( (b - a) / 3 ))
+
+    if [ "$fps" -ge "$MIN_FPS" ]; then
+        strikes=0
+    else
+        strikes=$(( strikes + 1 ))
+        echo "ackermann-drive-watchdog: CAN tx ${fps} fps (need >= ${MIN_FPS}) -- strike ${strikes}/${NEEDED}" >&2
+        if [ "$strikes" -ge "$NEEDED" ]; then
+            echo "ackermann-drive-watchdog: THE VEHICLE IS NOT COMMANDABLE." >&2
+            echo "  ackermann-drive.service is active and the controllers will report active," >&2
+            echo "  but the hardware component has stopped writing to ${IFACE}." >&2
+            if [ "$ACTION" = "restart" ]; then
+                echo "  Restarting ackermann-drive.service. THE STEERING WILL RE-CENTRE." >&2
+                systemctl restart ackermann-drive.service
+                sleep "$COOLDOWN"
+            else
+                echo "  WATCHDOG_ACTION=${ACTION}; not acting. Restart it by hand." >&2
+            fi
+            strikes=0
+        fi
+    fi
+    sleep "$PERIOD"
+done

@@ -24,17 +24,10 @@ COMPATIBLE_MACHINE = "(tegra)"
 # the CMake CUDA language support and is what actually reaches nvcc here.
 CUDA_ARCHITECTURES = "87"
 
-# ── Where TensorRT actually lives in a cross build ───────────────────────────
-# The package defaults to /usr/include/aarch64-linux-gnu and
-# /usr/lib/aarch64-linux-gnu, which is correct for JetPack's .debs on a running
-# board and wrong here: meta-tegra's tensorrt-core and tensorrt-plugins-prebuilt
-# both install to ${includedir}/${libdir} with no multiarch component. Left
-# unset, the compiler would be pointed at the BUILD HOST's /usr/include -- which
-# on an x86_64 builder either fails to find NvInfer.h or, worse, finds a
-# different version of it.
-#
-# cuda.bbclass covers the CUDA toolkit paths but says nothing about TensorRT;
-# these two are the part it does not reach.
+# The package's default TensorRT paths assume JetPack's multiarch .deb layout;
+# meta-tegra installs to plain ${includedir}/${libdir}. Left unset, an x86_64
+# build host would pick up its own (wrong or missing) NvInfer.h. cuda.bbclass
+# covers CUDA toolkit paths but not TensorRT, hence this.
 EXTRA_OECMAKE += " \
     -DCMAKE_BUILD_TYPE=Release \
     -DBUILD_TESTING=OFF \
@@ -62,11 +55,9 @@ ROS_EXEC_DEPENDS = " \
     lidar-tracking \
 "
 
-# tensorrt-core carries libnvinfer. tensorrt-plugins-prebuilt carries
-# libnvonnxparser, which this links by its UNVERSIONED name -- and per the note
-# in orinivi-image.bb the unversioned .so symlink lands in the -dev package, so
-# it must be staged at build time even though only the SONAME matters at
-# runtime. Both are needed: the ONNX parser is not part of tensorrt-core.
+# tensorrt-core carries libnvinfer; tensorrt-plugins-prebuilt carries libnvonnxparser,
+# linked by its unversioned name so the -dev package (which holds that symlink) is
+# needed at build time even though only the SONAME matters at runtime.
 DEPENDS = "${ROS_BUILD_DEPENDS} tensorrt-core tensorrt-plugins-prebuilt"
 RDEPENDS:${PN} = "${ROS_EXEC_DEPENDS} tensorrt-core tensorrt-plugins-prebuilt"
 
@@ -74,15 +65,9 @@ do_compile:prepend() {
     export ROS_DISTRO="humble"
 }
 
-# pc_process installs to lib/${PROJECT_NAME}, the ament convention for node
-# executables; the .onnx installs to share/${PROJECT_NAME}/model.
-#
-# NOTE ON THE MODEL: only the .onnx ships. TensorRT engines must be built on the
-# target and are bound to an exact TRT version + GPU arch, so a prebuilt one
-# would be useless here -- see the TensorRT section of orinivi-image.bb. The
-# node builds and caches its own engine on first run. Where that cache lands is
-# handled by lidar-perception-bringup, not here: the default location is beside
-# the .onnx under ${ros_datadir}, which does not survive an A/B OTA.
+# Only the .onnx ships -- TensorRT engines are bound to an exact TRT version and
+# GPU arch, so a prebuilt one would be useless. The node builds and caches its own
+# on first run; where that cache lands is handled by lidar-perception-bringup.
 FILES:${PN} += " \
     ${ros_libdir}/${ROS_BPN} \
     ${ros_datadir}/${ROS_BPN}/model \

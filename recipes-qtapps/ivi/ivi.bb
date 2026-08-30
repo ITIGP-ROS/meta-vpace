@@ -103,12 +103,9 @@ RDEPENDS:${PN} += " \
 RDEPENDS:${PN} += " vosk "
 
 # --- Audio / Bluetooth  ---
-# module-loopback is required for phone audio and is not pulled in by any of the
-# bluez5 packages. A phone is an A2DP *source*, so pulseaudio exposes it as
-# bluez_source.<MAC>.a2dp_source; module-bluetooth-policy routes that to the
-# speakers by loading module-loopback. Without it on disk, policy fails and falls
-# back to setting the card profile to "off" — the phone pairs, AVRCP metadata and
-# transport controls all work, and there is no sound.
+# module-loopback is required for phone audio, not pulled in by bluez5: policy
+# routes the A2DP source to speakers via loopback, and without it falls back to
+# card profile "off" -- pairing and AVRCP work, but there's no sound.
 RDEPENDS:${PN} += " \
     pulseaudio \
     pulseaudio-server \
@@ -138,15 +135,9 @@ do_install:append() {
     install -d ${D}${systemd_system_unitdir}
     install -m 0644 ${UNPACKDIR}/ivi-app.service ${D}${systemd_system_unitdir}/
 
-    # Fast DDS transport profile: UDPv4 only, no shared memory.
-    #
-    # Load-bearing, not tuning. appIVI runs as `weston` while the ROS
-    # publishers run as `root`, and Fast DDS shared-memory ports are created
-    # 0644 by their owning user, so the cross-user SHM channel silently never
-    # forms -- discovery matches, no data ever arrives. ivi-app.service points
-    # FASTRTPS_DEFAULT_PROFILES_FILE at this; the file itself carries the full
-    # rationale, the measurements, and when to revisit the tradeoff.
-    #
+    # Fast DDS transport profile: UDPv4 only, no shared memory. Load-bearing --
+    # appIVI runs as weston while ROS publishers run as root, and DDS shared-memory
+    # ports are user-owned 0644, so cross-user SHM silently never forms otherwise.
     # 0644 so the weston-owned app can read it at startup.
     install -d ${D}${sysconfdir}
     install -m 0644 ${UNPACKDIR}/dds-udp-only.xml ${D}${sysconfdir}/
